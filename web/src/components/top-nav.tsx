@@ -6,6 +6,7 @@ import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
+import { useAppText } from "@/hooks/use-app-text";
 import { getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
@@ -25,6 +26,7 @@ export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
+  const appText = useAppText(pathname !== "/login" && Boolean(session));
 
   useEffect(() => {
     let active = true;
@@ -60,8 +62,9 @@ export function TopNav() {
     return null;
   }
 
-  const navItems = session.role === "admin" ? adminNavItems : userNavItems;
-  const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
+  const isAdmin = session.role === "admin";
+  const navItems = isAdmin ? adminNavItems : userNavItems;
+  const roleLabel = isAdmin ? "管理员" : "普通用户";
   const displayName = session.name.trim() || roleLabel;
 
   return (
@@ -70,20 +73,22 @@ export function TopNav() {
         <div className="flex items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <Link
             href="/image"
-            className="shrink-0 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700"
+            className="max-w-[42vw] shrink-0 truncate py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700 sm:max-w-44"
           >
-            chatgpt2api
+            {appText.brand_name}
           </Link>
-          <a
-            href="https://github.com/basketikun/chatgpt2api"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 py-1 text-sm text-stone-400 transition hover:text-stone-700"
-            aria-label="GitHub repository"
-          >
-            <Github className="size-4" />
-            <span className="hidden md:inline">GitHub</span>
-          </a>
+          {isAdmin ? (
+            <a
+              href={appText.github_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-w-0 items-center gap-1.5 py-1 text-sm text-stone-400 transition hover:text-stone-700"
+              aria-label={appText.github_label}
+            >
+              <Github className="size-4" />
+              <span className="hidden max-w-32 truncate md:inline">{appText.github_label}</span>
+            </a>
+          ) : null}
           <button
             type="button"
             className="ml-auto shrink-0 py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:hidden"

@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 import time
+from urllib.parse import urlparse
 
 from services.storage.base import StorageBackend
 
@@ -42,6 +43,14 @@ DEFAULT_IMAGE_QUOTA = {
     "edit_multiplier": 1.0,
 }
 MIN_IMAGE_QUOTA_MULTIPLIER = 0.000001
+
+DEFAULT_APP_TEXT = {
+    "brand_name": "chatgpt2api",
+    "github_label": "GitHub",
+    "github_url": "https://github.com/basketikun/chatgpt2api",
+    "register_eyebrow": "Register",
+    "register_title": "ChatGPT注册机",
+}
 
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
@@ -143,6 +152,19 @@ def _normalize_image_quota_settings(value: object) -> dict[str, object]:
             MIN_IMAGE_QUOTA_MULTIPLIER,
         ),
     }
+
+
+def _normalize_app_text_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, object] = {}
+    for key, default_value in DEFAULT_APP_TEXT.items():
+        raw_value = source.get(key, default_value)
+        text = str(raw_value or "").strip()
+        normalized[key] = text or default_value
+    parsed_github_url = urlparse(str(normalized["github_url"]))
+    if parsed_github_url.scheme not in {"http", "https"} or not parsed_github_url.netloc:
+        normalized["github_url"] = DEFAULT_APP_TEXT["github_url"]
+    return normalized
 
 
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
@@ -375,6 +397,7 @@ class ConfigStore:
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
         data["image_quota"] = self.get_image_quota_settings()
+        data["app_text"] = self.get_app_text_settings()
         data.pop("auth-key", None)
         return data
 
@@ -391,6 +414,8 @@ class ConfigStore:
             _validate_image_storage_settings(next_data["image_storage"])
         if "image_quota" in next_data:
             next_data["image_quota"] = _normalize_image_quota_settings(next_data.get("image_quota"))
+        if "app_text" in next_data:
+            next_data["app_text"] = _normalize_app_text_settings(next_data.get("app_text"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -404,6 +429,9 @@ class ConfigStore:
 
     def get_image_quota_settings(self) -> dict[str, object]:
         return _normalize_image_quota_settings(self.data.get("image_quota"))
+
+    def get_app_text_settings(self) -> dict[str, object]:
+        return _normalize_app_text_settings(self.data.get("app_text"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

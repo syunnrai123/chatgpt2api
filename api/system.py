@@ -87,6 +87,11 @@ def create_router(app_version: str) -> APIRouter:
     async def current_identity(authorization: str | None = Header(default=None)):
         return _identity_payload(require_identity(authorization))
 
+    @router.get("/api/app-text")
+    async def get_app_text(authorization: str | None = Header(default=None)):
+        require_identity(authorization)
+        return {"app_text": config.get_app_text_settings()}
+
     @router.get("/version")
     async def get_version():
         return {"version": app_version}

@@ -8,6 +8,7 @@ import {Checkbox} from "@/components/ui/checkbox";
 import {Input} from "@/components/ui/input";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from "@/components/ui/select";
 import {Textarea} from "@/components/ui/textarea";
+import {DEFAULT_APP_TEXT, type AppTextSettings} from "@/lib/app-text";
 import type {ImageStorageMode} from "@/lib/api";
 
 import {useSettingsStore} from "../store";
@@ -26,6 +27,7 @@ export function ConfigCard() {
     const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
     const setLogLevel = useSettingsStore((state) => state.setLogLevel);
     const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
+    const setAppTextField = useSettingsStore((state) => state.setAppTextField);
     const setGlobalSystemPrompt = useSettingsStore((state) => state.setGlobalSystemPrompt);
     const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
     const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
@@ -46,12 +48,45 @@ export function ConfigCard() {
         );
     }
 
+    const appText = {...DEFAULT_APP_TEXT, ...(config?.app_text || {})};
+    const appTextFields: Array<{
+        key: keyof AppTextSettings;
+        label: string;
+        placeholder: string;
+        span?: string;
+    }> = [
+        {key: "brand_name", label: "顶部品牌文字", placeholder: DEFAULT_APP_TEXT.brand_name},
+        {key: "github_label", label: "GitHub 链接文字", placeholder: DEFAULT_APP_TEXT.github_label},
+        {key: "github_url", label: "GitHub 链接地址", placeholder: DEFAULT_APP_TEXT.github_url, span: "md:col-span-2"},
+        {key: "register_eyebrow", label: "注册页小标题", placeholder: DEFAULT_APP_TEXT.register_eyebrow},
+        {key: "register_title", label: "注册页标题", placeholder: DEFAULT_APP_TEXT.register_title},
+    ];
+
     return (
         <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
             <CardContent className="space-y-4 p-6">
                 <div
                     className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
                     管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
+                </div>
+                <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-3">
+                    <div>
+                        <h2 className="text-sm font-semibold text-stone-800">界面文字</h2>
+                        <p className="mt-1 text-xs text-stone-500">保存后刷新页面生效，用于顶部导航和注册机页眉。</p>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                        {appTextFields.map((field) => (
+                            <div key={field.key} className={`space-y-2 ${field.span || ""}`}>
+                                <label className="text-sm text-stone-700">{field.label}</label>
+                                <Input
+                                    value={String(appText[field.key] || "")}
+                                    onChange={(event) => setAppTextField(field.key, event.target.value)}
+                                    placeholder={field.placeholder}
+                                    className="h-10 rounded-xl border-stone-200 bg-white"
+                                />
+                            </div>
+                        ))}
+                    </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">

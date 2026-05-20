@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from threading import Lock
 from typing import Any, Literal
@@ -15,6 +15,7 @@ from services.storage.base import StorageBackend
 AuthRole = Literal["admin", "user"]
 ImageQuotaMode = Literal["generate", "edit"]
 QUOTA_SCALE = Decimal("0.000001")
+SYNC_QUOTA_RESERVATION_TTL = timedelta(hours=24)
 
 
 def _now_iso() -> str:
@@ -41,6 +42,23 @@ def _quota_number(value: Decimal | object) -> float:
 
 def _reservation_id(value: object) -> str:
     return str(value or "").strip()
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _sync_reservation_expires_at() -> str:
+    return (datetime.now(timezone.utc) + SYNC_QUOTA_RESERVATION_TTL).isoformat()
 
 
 class ImageQuotaError(ValueError):
@@ -111,6 +129,9 @@ class AuthService:
                 "cost": _quota_number(cost),
                 "created_at": str(item.get("created_at") or _now_iso()),
             }
+            expires_at = str(item.get("expires_at") or "").strip()
+            if expires_at:
+                reservations[reservation_id]["expires_at"] = expires_at
         return reservations
 
     @staticmethod
@@ -139,6 +160,38 @@ class AuthService:
 
     def _reload_locked(self) -> None:
         self._items = self._load()
+        if self._prune_expired_quota_reservations_locked():
+            try:
+                self._save()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_expired_quota_reservation(reservation: dict[str, object], now: datetime) -> bool:
+        expires_at = _parse_iso_datetime(reservation.get("expires_at"))
+        return expires_at is not None and expires_at <= now
+
+    def _prune_expired_quota_reservations_locked(self) -> bool:
+        now = datetime.now(timezone.utc)
+        changed = False
+        for index, item in enumerate(self._items):
+            reservations = self._active_reservations(item)
+            if not reservations:
+                continue
+            active = {
+                reservation_id: reservation
+                for reservation_id, reservation in reservations.items()
+                if not self._is_expired_quota_reservation(reservation, now)
+            }
+            if len(active) == len(reservations):
+                continue
+            next_item = dict(item)
+            balance = _quota_decimal(next_item.get("image_quota"))
+            next_item["image_quota_reservations"] = active
+            next_item["image_quota_reserved"] = _quota_number(min(self._reserved_quota(active), balance))
+            self._items[index] = next_item
+            changed = True
+        return changed
 
     @staticmethod
     def _public_item(item: dict[str, object]) -> dict[str, object]:
@@ -336,7 +389,8 @@ class AuthService:
         if not key_id:
             raise ImageQuotaError("密钥无效或已失效，请重新登录")
         cost = _quota_decimal(self.image_quota_cost(mode=mode, count=count))
-        normalized_reservation_id = _reservation_id(reservation_id) or uuid.uuid4().hex
+        provided_reservation_id = _reservation_id(reservation_id)
+        normalized_reservation_id = provided_reservation_id or uuid.uuid4().hex
         with self._lock:
             self._reload_locked()
             for index, item in enumerate(self._items):
@@ -365,6 +419,8 @@ class AuthService:
                     "cost": _quota_number(cost),
                     "created_at": _now_iso(),
                 }
+                if not provided_reservation_id:
+                    reservation["expires_at"] = _sync_reservation_expires_at()
                 reservations[normalized_reservation_id] = {key: value for key, value in reservation.items() if key != "key_id"}
                 next_item["image_quota_reservations"] = reservations
                 next_item["image_quota_reserved"] = _quota_number(self._reserved_quota(reservations))

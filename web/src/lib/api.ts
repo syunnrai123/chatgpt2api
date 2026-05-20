@@ -1,4 +1,5 @@
 import {httpRequest, request} from "@/lib/request";
+import type {AppTextSettings} from "@/lib/app-text";
 
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
@@ -74,6 +75,7 @@ export type AccountExportFormat = "json" | "zip";
 export type SettingsConfig = {
     proxy?: string;
     base_url?: string;
+    app_text?: AppTextSettings;
     global_system_prompt?: string;
     sensitive_words?: string[];
     ai_review?: {
@@ -474,6 +476,10 @@ export async function fetchImageTasks(ids: string[]) {
 
 export async function fetchSettingsConfig() {
     return httpRequest<{ config: SettingsConfig }>("/api/settings");
+}
+
+export async function fetchAppText() {
+    return httpRequest<{ app_text: AppTextSettings }>("/api/app-text");
 }
 
 export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {

@@ -5,6 +5,7 @@ import { LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 
 import webConfig from "@/constants/common-env";
+import { useAppText } from "@/hooks/use-app-text";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import type { RegisterConfig } from "@/lib/api";
 import { getStoredAuthKey } from "@/store/auth";
@@ -69,13 +70,15 @@ function RegisterDataController() {
 }
 
 function RegisterPageContent() {
+  const appText = useAppText();
+
   return (
     <>
       <RegisterDataController />
       <section className="mb-2 flex flex-col gap-1 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Register</div>
-          <h1 className="text-2xl font-semibold tracking-tight">ChatGPT注册机</h1>
+          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">{appText.register_eyebrow}</div>
+          <h1 className="text-2xl font-semibold tracking-tight">{appText.register_title}</h1>
         </div>
       </section>
       <section>

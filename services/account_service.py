@@ -17,6 +17,28 @@ from utils.helper import anonymize_token
 
 
 EXPORT_TIMEZONE = timezone(timedelta(hours=8))
+ACCOUNT_TYPE_KEYS = {
+    "account_type",
+    "accounttype",
+    "plan",
+    "plan_type",
+    "plantype",
+    "subscription",
+    "subscription_plan",
+    "subscriptionplan",
+    "tier",
+    "type",
+}
+ACCOUNT_TYPE_ALIASES = {
+    "free": "free",
+    "plus": "Plus",
+    "pro": "Pro",
+    "pro_lite": "ProLite",
+    "pro-lite": "ProLite",
+    "prolite": "ProLite",
+    "team": "Team",
+    "enterprise": "Enterprise",
+}
 
 
 def _clean_string(value: Any) -> str:
@@ -48,6 +70,10 @@ def _format_timestamp(value: Any) -> str:
 
 def _nested_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _normalized_key(value: Any) -> str:
+    return "".join(char for char in _clean_string(value).lower() if char.isalnum() or char == "_")
 
 
 class AccountService:
@@ -82,6 +108,39 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _normalize_account_type(value: Any, *, allow_unknown: bool = False) -> str:
+        if isinstance(value, (dict, list, tuple, set)):
+            return ""
+        raw = _clean_string(value)
+        if not raw:
+            return ""
+        normalized = raw.lower().replace(" ", "_")
+        return ACCOUNT_TYPE_ALIASES.get(normalized, ACCOUNT_TYPE_ALIASES.get(normalized.replace("_", ""), raw if allow_unknown else ""))
+
+    def _search_account_type(self, value: Any) -> str | None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if _normalized_key(key) in ACCOUNT_TYPE_KEYS:
+                    if isinstance(item, (dict, list)):
+                        account_type = self._search_account_type(item)
+                    else:
+                        account_type = self._normalize_account_type(item)
+                    if account_type:
+                        return account_type
+            for item in value.values():
+                if isinstance(item, (dict, list)):
+                    account_type = self._search_account_type(item)
+                    if account_type:
+                        return account_type
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    account_type = self._search_account_type(item)
+                    if account_type:
+                        return account_type
+        return None
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -90,7 +149,7 @@ class AccountService:
             return None
         normalized = dict(item)
         normalized["access_token"] = access_token
-        normalized["type"] = normalized.get("type") or "free"
+        normalized["type"] = self._normalize_account_type(normalized.get("type"), allow_unknown=True) or self._search_account_type(normalized) or "free"
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))

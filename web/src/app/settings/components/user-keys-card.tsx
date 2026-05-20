@@ -16,6 +16,7 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 import {Input} from "@/components/ui/input";
+import {Textarea} from "@/components/ui/textarea";
 import {
     createUserKey,
     deleteUserKey,
@@ -50,6 +51,25 @@ function formatQuota(value?: number | null) {
     return new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 6}).format(amount);
 }
 
+function buildUserKeyDemoCurl(baseUrl: string, apiKey: string) {
+    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "") || "https://your-domain.example/v1";
+    const endpoint = `${normalizedBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/chat/completions`;
+
+    return `curl --request POST "${endpoint}" \\
+  --header "Authorization: Bearer ${apiKey}" \\
+  --header "Content-Type: application/json" \\
+  --data '{
+    "model": "auto",
+    "messages": [
+      {
+        "role": "user",
+        "content": "你好，测试一下接口是否可用"
+      }
+    ],
+    "stream": false
+  }'`;
+}
+
 export function UserKeysCard() {
     const didLoadRef = useRef(false);
     const [items, setItems] = useState<UserKey[]>([]);
@@ -67,6 +87,7 @@ export function UserKeysCard() {
     const [editKey, setEditKey] = useState("");
     const [rechargeAmount, setRechargeAmount] = useState("");
     const [isRecharging, setIsRecharging] = useState(false);
+    const [demoBaseUrl, setDemoBaseUrl] = useState("https://your-domain.example/v1");
 
     const load = async () => {
         setIsLoading(true);
@@ -85,6 +106,9 @@ export function UserKeysCard() {
             return;
         }
         didLoadRef.current = true;
+        if (typeof window !== "undefined") {
+            setDemoBaseUrl(`${window.location.origin}/v1`);
+        }
         void load();
     }, []);
 
@@ -223,6 +247,8 @@ export function UserKeysCard() {
         }
     };
 
+    const revealedKeyDemoCurl = revealedKey ? buildUserKeyDemoCurl(demoBaseUrl, revealedKey) : "";
+
     return (
         <>
             <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -246,7 +272,7 @@ export function UserKeysCard() {
 
                     {revealedKey ? (
                         <div
-                            className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-900">
+                            className="space-y-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-900">
                             <div className="font-medium">新密钥仅展示一次，请立即保存：</div>
                             <div
                                 className="mt-3 flex flex-col gap-3 rounded-lg border border-emerald-200 bg-white/80 p-3 md:flex-row md:items-center md:justify-between">
@@ -260,6 +286,30 @@ export function UserKeysCard() {
                                     <Copy className="size-4"/>
                                     复制
                                 </Button>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <div className="font-medium">调用演示</div>
+                                        <p className="mt-1 text-xs leading-5 text-emerald-800/80">
+                                            分发给客户时可附带这段 OpenAI 兼容 curl，Base URL 使用当前站点自动生成。
+                                        </p>
+                                    </div>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="h-9 rounded-xl border-emerald-200 bg-white px-4 text-emerald-700"
+                                        onClick={() => void handleCopy(revealedKeyDemoCurl)}
+                                    >
+                                        <Copy className="size-4"/>
+                                        复制演示
+                                    </Button>
+                                </div>
+                                <Textarea
+                                    readOnly
+                                    value={revealedKeyDemoCurl}
+                                    className="min-h-56 resize-none rounded-xl border-emerald-200 bg-white/90 font-mono text-xs leading-5 text-stone-800 shadow-none"
+                                />
                             </div>
                         </div>
                     ) : null}

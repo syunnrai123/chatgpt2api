@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -198,6 +199,27 @@ class AuthServiceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "图片额度不足"):
                 service.reserve_image_quota(identity, mode="generate", count=2)
+
+    def test_expired_sync_image_quota_reservation_is_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            auth_keys_path = Path(tmp_dir) / "auth_keys.json"
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", auth_keys_path))
+            service._image_quota_multiplier = lambda _mode: Decimal("1")
+            _, raw_key = service.create_key(role="user", name="Alice", image_quota=1)
+            identity = service.authenticate(raw_key)
+            reservation = service.reserve_image_quota(identity, mode="generate", count=1)
+            payload = json.loads(auth_keys_path.read_text(encoding="utf-8"))
+            stored_reservation = payload["items"][0]["image_quota_reservations"][reservation["id"]]
+            stored_reservation["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+            auth_keys_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            [listed] = service.list_keys(role="user")
+            payload = json.loads(auth_keys_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(listed["image_quota"], 1)
+            self.assertEqual(listed["image_quota_reserved"], 0)
+            self.assertEqual(listed["image_quota_available"], 1)
+            self.assertEqual(payload["items"][0]["image_quota_reservations"], {})
 
 
 if __name__ == "__main__":

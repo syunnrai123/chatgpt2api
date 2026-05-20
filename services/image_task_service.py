@@ -496,11 +496,13 @@ class ImageTaskService:
                 raise RuntimeError(message)
             task = self._get_task(key)
             reservation = task.get("quota_reservation") if task else None
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", quota_status="charge_pending")
             quota_status = _finalize_task_reservation(reservation if isinstance(reservation, dict) else None, charge=True)
             try:
                 self._update_task(
                     key,
+                    status=TASK_STATUS_SUCCESS,
+                    data=data,
+                    error="",
                     quota_status=_public_quota_status(quota_status),
                     remove_quota_reservation=quota_status != "pending",
                 )
