@@ -72,7 +72,7 @@ export type AccountImportPayload = {
 export type AccountExportFormat = "json" | "zip";
 
 export type SettingsConfig = {
-    proxy: string;
+    proxy?: string;
     base_url?: string;
     global_system_prompt?: string;
     sensitive_words?: string[];
@@ -342,6 +342,13 @@ function getFilenameFromDisposition(value: unknown, fallback: string) {
     return match?.[1] || fallback;
 }
 
+function encodePathSegments(path: string) {
+    return path
+        .split("/")
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+}
+
 export async function exportAccounts(format: AccountExportFormat, accessTokens: string[] = []) {
     const response = await request.request<Blob>({
         url: "/api/accounts/export",
@@ -468,7 +475,7 @@ export async function fetchSettingsConfig() {
     return httpRequest<{ config: SettingsConfig }>("/api/settings");
 }
 
-export async function updateSettingsConfig(settings: SettingsConfig) {
+export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
     return httpRequest<{ config: SettingsConfig }>("/api/settings", {
         method: "POST",
         body: settings,
@@ -558,7 +565,7 @@ export async function downloadImages(paths: string[]) {
 }
 
 export async function downloadSingleImage(path: string) {
-    const response = await request.get(`/api/images/download/${path}`, {responseType: "blob"});
+    const response = await request.get(`/api/images/download/${encodePathSegments(path)}`, {responseType: "blob"});
     const blob = response.data as Blob;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

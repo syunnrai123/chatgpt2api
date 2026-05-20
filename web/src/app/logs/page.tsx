@@ -188,7 +188,18 @@ function LogsContent() {
               </Button>
             </div>
           </div>
-          <div className="overflow-x-auto">
+          {isLoading && items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+              <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                <LoaderCircle className="size-5 animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-stone-700">正在加载日志</p>
+                <p className="text-sm text-stone-500">正在按当前类型和日期筛选读取记录。</p>
+              </div>
+            </div>
+          ) : null}
+          <div className={`overflow-x-auto ${isLoading && items.length === 0 ? "hidden" : ""}`}>
             <Table className="min-w-[900px]">
               <TableHeader>
                 <TableRow>
@@ -264,7 +275,7 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+          <div className={`flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500 ${isLoading && items.length === 0 ? "hidden" : ""}`}>
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />

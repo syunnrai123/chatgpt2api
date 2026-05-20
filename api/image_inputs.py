@@ -285,6 +285,8 @@ async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
                 await source.close()
             if not image_data:
                 raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+            if len(image_data) > MAX_IMAGE_REFERENCE_BYTES:
+                raise HTTPException(status_code=400, detail={"error": "image file exceeds 50MB limit"})
             images.append((image_data, source.filename or "image.png", source.content_type or "image/png"))
             continue
         images.append(await run_in_threadpool(_download_image_url, source))

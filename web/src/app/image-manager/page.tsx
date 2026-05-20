@@ -36,36 +36,6 @@ function imageKey(item: ManagedImage) {
   return item.rel || item.url;
 }
 
-function useLongPress(onLongPress: () => void, ms = LONG_PRESS_MS) {
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeRef = useRef(false);
-
-  const start = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    activeRef.current = true;
-    timerRef.current = setTimeout(() => {
-      if (activeRef.current) {
-        onLongPress();
-      }
-    }, ms);
-  }, [onLongPress, ms]);
-
-  const stop = useCallback(() => {
-    activeRef.current = false;
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  return {
-    onMouseDown: start,
-    onMouseUp: stop,
-    onMouseLeave: stop,
-    onTouchStart: start,
-    onTouchEnd: stop,
-  };
-}
-
 function ImageManagerContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [startDate, setStartDate] = useState("");
@@ -371,7 +341,18 @@ function ImageManagerContent() {
               </Button>
             </div>
           </div>
-          <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {isLoading && items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+              <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                <LoaderCircle className="size-5 animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-stone-700">正在加载图片</p>
+                <p className="text-sm text-stone-500">正在读取图片文件、远端存储状态和标签。</p>
+              </div>
+            </div>
+          ) : null}
+          <div className={`grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ${isLoading && items.length === 0 ? "hidden" : ""}`}>
             {currentRows.map((item) => {
               const imageIndex = filteredItems.findIndex((row) => row.url === item.url);
               const storage = storageBadge(item);

@@ -212,7 +212,6 @@ type SettingsStore = {
     setAutoRemoveInvalidAccounts: (value: boolean) => void;
     setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
     setLogLevel: (level: string, enabled: boolean) => void;
-    setProxy: (value: string) => void;
     setBaseUrl: (value: string) => void;
     setGlobalSystemPrompt: (value: string) => void;
     setSensitiveWordsText: (value: string) => void;
@@ -339,7 +338,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
         set({isSavingConfig: true});
         try {
-            const data = await updateSettingsConfig({
+            const settingsPayload: Partial<SettingsConfig> = {
                 ...config,
                 refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
                 image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
@@ -351,7 +350,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
                 },
                 auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
                 auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
-                proxy: config.proxy.trim(),
                 base_url: String(config.base_url || "").trim(),
                 global_system_prompt: String(config.global_system_prompt || "").trim(),
                 sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
@@ -382,7 +380,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
                     rotation_keep: Math.max(0, Number(config.backup?.rotation_keep) || 0),
                     passphrase: String(config.backup?.passphrase || "").trim(),
                 },
-            });
+            };
+            delete settingsPayload.proxy;
+            const data = await updateSettingsConfig(settingsPayload);
             set({
                 config: normalizeConfig(data.config),
             });
@@ -449,20 +449,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             if (enabled) levels.add(level);
             else levels.delete(level);
             return {config: {...state.config, log_levels: Array.from(levels)}};
-        });
-    },
-
-    setProxy: (value) => {
-        set((state) => {
-            if (!state.config) {
-                return {};
-            }
-            return {
-                config: {
-                    ...state.config,
-                    proxy: value,
-                },
-            };
         });
     },
 

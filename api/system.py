@@ -14,7 +14,7 @@ from services.image_service import delete_images, download_images_zip, get_image
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
-from services.proxy_service import test_proxy
+from services.proxy_service import normalize_proxy_url, test_proxy
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -23,6 +23,11 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class ProxyUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    url: str | None = None
 
 
 class ImageDeleteRequest(BaseModel):
@@ -55,6 +60,14 @@ def _identity_payload(identity: dict[str, object]) -> dict[str, object]:
         if key in identity:
             payload[key] = identity.get(key)
     return payload
+
+
+def _proxy_payload() -> dict[str, object]:
+    proxy_url = config.get_proxy_settings()
+    return {
+        "enabled": bool(proxy_url),
+        "url": proxy_url,
+    }
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -131,6 +144,27 @@ def create_router(app_version: str) -> APIRouter:
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return log_service.delete(body.ids)
+
+    @router.get("/api/proxy")
+    async def get_proxy(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"proxy": _proxy_payload()}
+
+    @router.post("/api/proxy")
+    async def save_proxy(body: ProxyUpdateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        current_url = config.get_proxy_settings()
+        next_url = current_url if body.url is None else body.url.strip()
+        if body.enabled is False:
+            next_url = ""
+        if body.enabled is True and not next_url:
+            raise HTTPException(status_code=400, detail={"error": "启用代理时必须填写代理地址"})
+        try:
+            next_url = normalize_proxy_url(next_url)
+            config.update({"proxy": next_url})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"proxy": _proxy_payload()}
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):

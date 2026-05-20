@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { LoaderCircle } from "lucide-react";
+import { toast } from "sonner";
 
 import webConfig from "@/constants/common-env";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -25,19 +26,44 @@ function RegisterDataController() {
   useEffect(() => {
     let source: EventSource | null = null;
     let closed = false;
+    let reportedError = false;
+    let lastFallbackAt = 0;
+    const loadFallback = () => {
+      const now = Date.now();
+      if (now - lastFallbackAt >= 5000) {
+        lastFallbackAt = now;
+        void loadRegister(true);
+      }
+    };
     void getStoredAuthKey().then((token) => {
       if (closed || !token) return;
       const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
       source = new EventSource(`${baseUrl}/api/register/events?token=${encodeURIComponent(token)}`);
       source.onmessage = (event) => {
-        setRegisterConfig(JSON.parse(event.data) as RegisterConfig);
+        try {
+          setRegisterConfig(JSON.parse(event.data) as RegisterConfig);
+        } catch {
+          if (!reportedError) {
+            reportedError = true;
+            toast.error("注册机实时数据解析失败，已重新拉取最新配置");
+          }
+          loadFallback();
+        }
+      };
+      source.onerror = () => {
+        if (closed) return;
+        if (!reportedError) {
+          reportedError = true;
+          toast.error("注册机实时连接异常，正在等待自动重连，并已重新拉取最新配置");
+        }
+        loadFallback();
       };
     });
     return () => {
       closed = true;
       source?.close();
     };
-  }, [setRegisterConfig]);
+  }, [loadRegister, setRegisterConfig]);
 
   return null;
 }

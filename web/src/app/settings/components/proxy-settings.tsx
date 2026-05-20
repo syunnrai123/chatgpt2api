@@ -63,8 +63,7 @@ export function ProxySettingsCard() {
     }
     setIsSaving(true);
     try {
-      const payload: { enabled?: boolean; url?: string } = {};
-      if (enabledChanged) payload.enabled = formEnabled;
+      const payload: { enabled?: boolean; url?: string } = { enabled: formEnabled };
       if (urlChanged) payload.url = formUrl.trim();
       const data = await updateProxy(payload);
       setSettings(data.proxy);
@@ -76,6 +75,16 @@ export function ProxySettingsCard() {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleEnabledChange = (enabled: boolean) => {
+    setFormEnabled(enabled);
+    setTestResult(null);
+  };
+
+  const handleUrlChange = (value: string) => {
+    setFormUrl(value);
+    setTestResult(null);
   };
 
   const handleTest = async () => {
@@ -112,7 +121,7 @@ export function ProxySettingsCard() {
             <div>
               <h2 className="text-lg font-semibold tracking-tight">上游代理配置</h2>
               <p className="text-sm text-stone-500">
-                为 chatgpt.com 的请求配置出网代理，适合国内服务器部署；Sub2API / CPA 请求不受影响。
+                为 ChatGPT 上游、CPA 管理、内容审核和图片输入请求配置出网代理；Sub2API 连接不受影响。
               </p>
             </div>
           </div>
@@ -129,7 +138,7 @@ export function ProxySettingsCard() {
                 type="checkbox"
                 className="mt-1 size-4 rounded border-stone-300 text-stone-900 focus:ring-stone-900"
                 checked={formEnabled}
-                onChange={(event) => setFormEnabled(event.target.checked)}
+                onChange={(event) => handleEnabledChange(event.target.checked)}
               />
               <div className="space-y-0.5">
                 <div className="text-sm font-medium text-stone-800">启用代理</div>
@@ -146,12 +155,12 @@ export function ProxySettingsCard() {
               </label>
               <Input
                 value={formUrl}
-                onChange={(event) => setFormUrl(event.target.value)}
-                placeholder="http://user:pass@host:port 或 socks5://host:port"
+                onChange={(event) => handleUrlChange(event.target.value)}
+                placeholder="socks5://host:port 或 https://host:port"
                 className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
               />
               <div className="text-xs text-stone-400">
-                支持 <code className="font-mono">http / https / socks4 / socks5 / socks5h</code>。
+                支持 <code className="font-mono">http / https / socks5 / socks5h</code>。
               </div>
             </div>
 

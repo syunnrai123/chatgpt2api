@@ -27,11 +27,20 @@ def _is_valid_proxy_url(url: str) -> bool:
     return parsed.scheme in {"http", "https", "socks5", "socks5h"} and bool(parsed.netloc)
 
 
+def normalize_proxy_url(url: object) -> str:
+    candidate = _clean(url)
+    if candidate and not _is_valid_proxy_url(candidate):
+        raise ValueError("代理地址格式不正确，支持 http / https / socks5 / socks5h")
+    return candidate
+
+
 def test_proxy(url: str, *, timeout: float = 15.0) -> dict:
     candidate = _clean(url)
     if not candidate:
         return {"ok": False, "status": 0, "latency_ms": 0, "error": "proxy url is required"}
-    if not _is_valid_proxy_url(candidate):
+    try:
+        candidate = normalize_proxy_url(candidate)
+    except ValueError:
         return {"ok": False, "status": 0, "latency_ms": 0, "error": "invalid proxy url"}
     session = Session(impersonate="edge101", verify=True, proxy=candidate)
     started = time.perf_counter()
