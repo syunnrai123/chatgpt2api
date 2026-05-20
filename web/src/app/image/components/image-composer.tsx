@@ -14,6 +14,7 @@ type ImageComposerProps = {
   imageSize: string;
   availableQuota: string;
   activeTaskCount: number;
+  maxImageCount: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -32,6 +33,7 @@ export function ImageComposer({
   imageSize,
   availableQuota,
   activeTaskCount,
+  maxImageCount,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -198,7 +200,7 @@ export function ImageComposer({
                       type="number"
                       inputMode="numeric"
                       min="1"
-                      max="100"
+                      max={maxImageCount}
                       step="1"
                       value={imageCount}
                       onChange={(event) => onImageCountChange(event.target.value)}

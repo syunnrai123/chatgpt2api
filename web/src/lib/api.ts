@@ -234,6 +234,7 @@ export type LoginResponse = {
     image_quota?: number;
     image_quota_reserved?: number;
     image_quota_available?: number;
+    image_task_max_count?: number;
 };
 
 export type CurrentIdentity = Omit<LoginResponse, "version">;

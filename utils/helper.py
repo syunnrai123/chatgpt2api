@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from curl_cffi import requests
 from fastapi import HTTPException
+from services.image_limits import parse_image_count_limit
 from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
@@ -393,13 +394,7 @@ def extract_chat_prompt(body: dict[str, object]) -> str:
 
 
 def parse_image_count(raw_value: object) -> int:
-    try:
-        value = int(raw_value or 1)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
-    if value < 1 or value > 4:
-        raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
-    return value
+    return parse_image_count_limit(raw_value)
 
 
 def build_chat_image_markdown_content(image_result: dict[str, object]) -> str:

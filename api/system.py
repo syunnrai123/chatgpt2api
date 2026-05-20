@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.backup_service import BackupError, backup_service
 from services.config import config
+from services.image_limits import MAX_IMAGES_PER_REQUEST
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_image_response, get_thumbnail_response, list_images
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
@@ -55,6 +56,7 @@ def _identity_payload(identity: dict[str, object]) -> dict[str, object]:
         "role": identity.get("role"),
         "subject_id": identity.get("id"),
         "name": identity.get("name"),
+        "image_task_max_count": MAX_IMAGES_PER_REQUEST,
     }
     for key in ("image_quota", "image_quota_reserved", "image_quota_available"):
         if key in identity:

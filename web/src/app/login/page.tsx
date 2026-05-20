@@ -33,6 +33,7 @@ export default function LoginPage() {
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
+        imageTaskMaxCount: data.image_task_max_count,
       });
       router.replace(getDefaultRouteForRole(data.role));
     } catch (error) {

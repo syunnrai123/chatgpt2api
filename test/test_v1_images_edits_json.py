@@ -120,8 +120,18 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("remote image URLs are not supported", response.text)
 
+    def test_image_edit_accepts_json_n_at_task_limit(self):
+        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 上限", "n": 20, "image": PNG_DATA_URL})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.calls[0]["n"], 20)
+
+    def test_image_edit_rejects_json_n_zero(self):
+        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 为 0", "n": 0, "image": PNG_DATA_URL})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertFalse(self.calls)
+
     def test_image_edit_rejects_json_n_out_of_range(self):
-        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 越界", "n": 5, "image": PNG_DATA_URL})
+        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 越界", "n": 21, "image": PNG_DATA_URL})
         self.assertEqual(response.status_code, 400, response.text)
         self.assertFalse(self.calls)
 

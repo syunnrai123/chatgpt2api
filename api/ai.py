@@ -12,6 +12,7 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_text
 from services.log_service import LoggedCall
 from services.image_quota import ImageQuotaError, refund_image_reservation, reserve_for_image_request, run_image_handler_with_quota
+from services.image_limits import MAX_IMAGES_PER_REQUEST
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -26,7 +27,7 @@ from utils.helper import extract_chat_prompt, has_chat_image, has_response_input
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
-    n: int = Field(default=1, ge=1, le=4)
+    n: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     size: str | None = None
     response_format: str = "b64_json"
     history_disabled: bool = True

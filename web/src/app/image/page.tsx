@@ -46,9 +46,15 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_i
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
 const SUBMIT_IMAGE_TASK_CONCURRENCY = 4;
+const DEFAULT_MAX_IMAGES_PER_TASK = 20;
 
-function clampImageCount(value: string) {
-    return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
+function normalizeMaxImageCount(value: unknown) {
+    const parsed = Math.floor(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_IMAGES_PER_TASK;
+}
+
+function clampImageCount(value: string, maxCount = DEFAULT_MAX_IMAGES_PER_TASK) {
+    return String(Math.min(maxCount, Math.max(1, Math.floor(Number(value) || 1))));
 }
 
 const activeConversationQueueIds = new Set<string>();
@@ -365,7 +371,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
+function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; initialMaxImageCount: number }) {
     const didLoadQuotaRef = useRef(false);
     const conversationsRef = useRef<ImageConversation[]>([]);
     const resultsViewportRef = useRef<HTMLDivElement>(null);
@@ -382,6 +388,8 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
     const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [availableQuota, setAvailableQuota] = useState("加载中...");
+    const [maxImageCount, setMaxImageCount] = useState(initialMaxImageCount);
+    const [isMaxImageCountLoaded, setIsMaxImageCountLoaded] = useState(false);
     const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
     const [lightboxOpen, setLightboxOpen] = useState(false);
     const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -393,7 +401,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
         | null
     >(null);
 
-    const parsedCount = useMemo(() => Number(clampImageCount(imageCount)), [imageCount]);
+    const parsedCount = useMemo(() => Number(clampImageCount(imageCount, maxImageCount)), [imageCount, maxImageCount]);
     const selectedConversation = useMemo(
         () => conversations.find((item) => item.id === selectedConversationId) ?? null,
         [conversations, selectedConversationId],
@@ -439,7 +447,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
                 const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
                 const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
                 setImageSize(storedSize || "");
-                setImageCount(storedCount ? clampImageCount(storedCount) : "1");
+                setImageCount(storedCount || "1");
 
                 const items = await listImageConversations();
                 const normalizedItems = await recoverConversationHistory(items);
@@ -475,16 +483,24 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
     const loadQuota = useCallback(async () => {
         try {
             if (isAdmin) {
+                setMaxImageCount(initialMaxImageCount);
+                setIsMaxImageCountLoaded(true);
+                setImageCount((prev) => (prev ? clampImageCount(prev, initialMaxImageCount) : prev));
                 const data = await fetchAccounts();
                 setAvailableQuota(formatAvailableQuota(data.items));
                 return;
             }
-            const data = await fetchCurrentIdentity();
-            setAvailableQuota(formatUserQuota(data.image_quota_available));
+            const identity = await fetchCurrentIdentity();
+            const nextMaxImageCount = normalizeMaxImageCount(identity.image_task_max_count);
+            setMaxImageCount(nextMaxImageCount);
+            setIsMaxImageCountLoaded(true);
+            setImageCount((prev) => (prev ? clampImageCount(prev, nextMaxImageCount) : prev));
+            setAvailableQuota(formatUserQuota(identity.image_quota_available));
         } catch {
+            setIsMaxImageCountLoaded(true);
             setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
         }
-    }, [isAdmin]);
+    }, [initialMaxImageCount, isAdmin]);
 
     useEffect(() => {
         if (didLoadQuotaRef.current) {
@@ -539,10 +555,10 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
     }, [imageSize]);
 
     useEffect(() => {
-        if (typeof window !== "undefined" && parsedCount > 0) {
+        if (typeof window !== "undefined" && isMaxImageCountLoaded && parsedCount > 0) {
             window.localStorage.setItem(IMAGE_COUNT_STORAGE_KEY, String(parsedCount));
         }
-    }, [parsedCount]);
+    }, [isMaxImageCountLoaded, parsedCount]);
 
     useEffect(() => {
         if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
@@ -811,7 +827,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
 
         setSelectedConversationId(conversationId);
         setImagePrompt(turn.prompt);
-        setImageCount(String(Math.max(1, turn.count || turn.images.length || 1)));
+        setImageCount(clampImageCount(String(turn.count || turn.images.length || 1), maxImageCount));
         setImageSize(turn.size);
         setReferenceImages(turn.referenceImages);
         setReferenceImageFiles(
@@ -822,7 +838,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
         }
         textareaRef.current?.focus();
         toast.success("已复用这条提示词配置");
-    }, []);
+    }, [maxImageCount]);
 
     const openLightbox = useCallback((images: ImageLightboxItem[], index: number) => {
         if (images.length === 0) {
@@ -1068,7 +1084,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
 
             const now = new Date().toISOString();
             const nextTurnId = createId();
-            const count = Math.max(1, sourceTurn.count || sourceTurn.images.length || 1);
+            const count = Number(clampImageCount(String(sourceTurn.count || sourceTurn.images.length || 1), maxImageCount));
             const nextTurn: ImageTurn = {
                 id: nextTurnId,
                 prompt: sourceTurn.prompt,
@@ -1092,7 +1108,7 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
             void runConversationQueue(conversationId);
             toast.success("已加入重新生成队列");
         },
-        [runConversationQueue],
+        [maxImageCount, runConversationQueue],
     );
 
     const handleRetryImage = useCallback(
@@ -1314,11 +1330,12 @@ function ImagePageContent({isAdmin}: { isAdmin: boolean }) {
                         imageSize={imageSize}
                         availableQuota={availableQuota}
                         activeTaskCount={activeTaskCount}
+                        maxImageCount={maxImageCount}
                         referenceImages={referenceImages}
                         textareaRef={textareaRef}
                         fileInputRef={fileInputRef}
                         onPromptChange={setImagePrompt}
-                        onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
+                        onImageCountChange={(value) => setImageCount(value ? clampImageCount(value, maxImageCount) : "")}
                         onImageSizeChange={setImageSize}
                         onSubmit={handleSubmit}
                         onPickReferenceImage={() => fileInputRef.current?.click()}
@@ -1372,5 +1389,10 @@ export default function ImagePage() {
         );
     }
 
-    return <ImagePageContent isAdmin={session.role === "admin"}/>;
+    return (
+        <ImagePageContent
+            isAdmin={session.role === "admin"}
+            initialMaxImageCount={normalizeMaxImageCount(session.imageTaskMaxCount)}
+        />
+    );
 }
