@@ -53,20 +53,16 @@ function formatQuota(value?: number | null) {
 
 function buildUserKeyDemoCurl(baseUrl: string, apiKey: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "") || "https://your-domain.example/v1";
-    const endpoint = `${normalizedBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/chat/completions`;
+    const endpoint = `${normalizedBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/generations`;
 
     return `curl --request POST "${endpoint}" \\
   --header "Authorization: Bearer ${apiKey}" \\
   --header "Content-Type: application/json" \\
   --data '{
-    "model": "auto",
-    "messages": [
-      {
-        "role": "user",
-        "content": "你好，测试一下接口是否可用"
-      }
-    ],
-    "stream": false
+    "model": "gpt-image-2",
+    "prompt": "一只橘猫坐在电脑前测试接口，可爱插画风格",
+    "n": 1,
+    "response_format": "url"
   }'`;
 }
 
