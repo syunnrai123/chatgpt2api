@@ -37,6 +37,12 @@ DEFAULT_IMAGE_STORAGE = {
     "public_base_url": "",
 }
 
+DEFAULT_IMAGE_QUOTA = {
+    "generation_multiplier": 1.0,
+    "edit_multiplier": 1.0,
+}
+MIN_IMAGE_QUOTA_MULTIPLIER = 0.000001
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -53,6 +59,14 @@ def _normalize_bool(value: object, default: bool = False) -> bool:
 def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> int:
     try:
         normalized = int(value)
+    except (TypeError, ValueError):
+        normalized = default
+    return max(minimum, normalized)
+
+
+def _normalize_positive_float(value: object, default: float, minimum: float = 0.0) -> float:
+    try:
+        normalized = float(value)
     except (TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
@@ -112,6 +126,22 @@ def _normalize_image_storage_settings(value: object) -> dict[str, object]:
         "webdav_password": str(source.get("webdav_password") or "").strip(),
         "webdav_root_path": root_path or str(DEFAULT_IMAGE_STORAGE["webdav_root_path"]),
         "public_base_url": str(source.get("public_base_url") or "").strip().rstrip("/"),
+    }
+
+
+def _normalize_image_quota_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "generation_multiplier": _normalize_positive_float(
+            source.get("generation_multiplier"),
+            float(DEFAULT_IMAGE_QUOTA["generation_multiplier"]),
+            MIN_IMAGE_QUOTA_MULTIPLIER,
+        ),
+        "edit_multiplier": _normalize_positive_float(
+            source.get("edit_multiplier"),
+            float(DEFAULT_IMAGE_QUOTA["edit_multiplier"]),
+            MIN_IMAGE_QUOTA_MULTIPLIER,
+        ),
     }
 
 
@@ -246,7 +276,7 @@ class ConfigStore:
     @property
     def image_account_concurrency(self) -> int:
         try:
-            return max(1, int(self.data.get("image_account_concurrency", 3)))
+            return min(8, max(1, int(self.data.get("image_account_concurrency", 3))))
         except (TypeError, ValueError):
             return 3
 
@@ -344,6 +374,7 @@ class ConfigStore:
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
+        data["image_quota"] = self.get_image_quota_settings()
         data.pop("auth-key", None)
         return data
 
@@ -358,6 +389,8 @@ class ConfigStore:
         if "image_storage" in next_data:
             next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
             _validate_image_storage_settings(next_data["image_storage"])
+        if "image_quota" in next_data:
+            next_data["image_quota"] = _normalize_image_quota_settings(next_data.get("image_quota"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -368,6 +401,9 @@ class ConfigStore:
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
+
+    def get_image_quota_settings(self) -> dict[str, object]:
+        return _normalize_image_quota_settings(self.data.get("image_quota"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

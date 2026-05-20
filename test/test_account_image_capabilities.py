@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
@@ -148,6 +150,54 @@ class AuthServiceTests(unittest.TestCase):
             updated = service.update_key(first["id"], {"name": "Alice"}, role="user")
             self.assertIsNotNone(updated)
             self.assertEqual(updated["name"], "Alice")
+
+    def test_legacy_user_key_defaults_to_zero_image_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            auth_keys_path = Path(tmp_dir) / "auth_keys.json"
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", auth_keys_path))
+            item, _ = service.create_key(role="user", name="Alice", image_quota=5)
+            payload = json.loads(auth_keys_path.read_text(encoding="utf-8"))
+            payload["items"][0].pop("image_quota", None)
+            payload["items"][0].pop("image_quota_reserved", None)
+            auth_keys_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            reloaded = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", auth_keys_path))
+            [listed] = reloaded.list_keys(role="user")
+
+            self.assertEqual(listed["id"], item["id"])
+            self.assertEqual(listed["image_quota"], 0)
+            self.assertEqual(listed["image_quota_available"], 0)
+
+    def test_image_quota_reserve_confirm_and_refund(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            service._image_quota_multiplier = lambda _mode: Decimal("1")
+            item, raw_key = service.create_key(role="user", name="Alice", image_quota=2.5)
+            identity = service.authenticate(raw_key)
+
+            reservation = service.reserve_image_quota(identity, mode="generate", count=2)
+            duplicate = service.reserve_image_quota(identity, mode="generate", count=2, reservation_id=reservation["id"])
+            self.assertEqual(duplicate["id"], reservation["id"])
+            listed = service.list_keys(role="user")[0]
+            self.assertEqual(listed["image_quota"], 2.5)
+            self.assertEqual(listed["image_quota_reserved"], 2)
+            self.assertEqual(listed["image_quota_available"], 0.5)
+
+            service.refund_image_quota(reservation)
+            listed = service.list_keys(role="user")[0]
+            self.assertEqual(listed["image_quota"], 2.5)
+            self.assertEqual(listed["image_quota_available"], 2.5)
+
+            reservation = service.reserve_image_quota(identity, mode="edit", count=1)
+            service.confirm_image_quota(reservation)
+            service.confirm_image_quota(reservation)
+            service.refund_image_quota(reservation)
+            listed = service.list_keys(role="user")[0]
+            self.assertEqual(listed["image_quota"], 1.5)
+            self.assertEqual(listed["image_quota_reserved"], 0)
+
+            with self.assertRaisesRegex(ValueError, "图片额度不足"):
+                service.reserve_image_quota(identity, mode="generate", count=2)
 
 
 if __name__ == "__main__":

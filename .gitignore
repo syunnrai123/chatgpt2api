@@ -1,30 +1,75 @@
-# Python-generated files
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python cache and build artifacts
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
 build/
 dist/
 wheels/
-*.egg-info
-web_dist
+*.egg-info/
+*.egg
+
 # Virtual environments
-.venv
-.idea
-data
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and local config
+.env
+.env.*
+!.env.example
+!.env.*.example
 config.json
-edit
-
-docker-compose-local.yml
-
 .claude/settings.local.json
 
-# Environment variables
-.env
-.env.local
-
-# Database files
+# App runtime data
+data/
+edit/
+git_cache/
 *.db
 *.sqlite
 *.sqlite3
+*.log
+logs/
 
-# Git cache
-git_cache/
+# Frontend dependencies and build artifacts
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+web_dist/
+
+# Deployment and local Docker overrides
+.vercel/
+docker-compose.local.yml
+docker-compose-local.yml
+
+# Local tool state
+.ace-tool/

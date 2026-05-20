@@ -44,6 +44,19 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+def _identity_payload(identity: dict[str, object]) -> dict[str, object]:
+    payload = {
+        "ok": True,
+        "role": identity.get("role"),
+        "subject_id": identity.get("id"),
+        "name": identity.get("name"),
+    }
+    for key in ("image_quota", "image_quota_reserved", "image_quota_available"):
+        if key in identity:
+            payload[key] = identity.get(key)
+    return payload
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -51,12 +64,13 @@ def create_router(app_version: str) -> APIRouter:
     async def login(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         return {
-            "ok": True,
+            **_identity_payload(identity),
             "version": app_version,
-            "role": identity.get("role"),
-            "subject_id": identity.get("id"),
-            "name": identity.get("name"),
         }
+
+    @router.get("/api/auth/me")
+    async def current_identity(authorization: str | None = Header(default=None)):
+        return _identity_payload(require_identity(authorization))
 
     @router.get("/version")
     async def get_version():

@@ -102,6 +102,57 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
 
 
+def _data_image_url(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower().startswith("data:image/")
+
+
+def has_image_in_message_content(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "image_url":
+            url_obj = item.get("image_url") or item
+            url = url_obj.get("url") if isinstance(url_obj, dict) else url_obj
+            if _data_image_url(url):
+                return True
+        elif item_type == "input_image":
+            if _data_image_url(item.get("image_url")):
+                return True
+    return False
+
+
+def has_chat_image(body: dict[str, object]) -> bool:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        if has_image_in_message_content(message.get("content")):
+            return True
+    return False
+
+
+def has_response_input_image(input_value: object) -> bool:
+    if isinstance(input_value, dict):
+        return has_image_in_message_content(input_value.get("content"))
+    if not isinstance(input_value, list):
+        return False
+    for item in reversed(input_value):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() == "input_image" and _data_image_url(item.get("image_url")):
+            return True
+        if has_image_in_message_content(item.get("content")):
+            return True
+    return False
+
+
 _UPSTREAM_BODY_LOG_LIMIT = 500
 
 

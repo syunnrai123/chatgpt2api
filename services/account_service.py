@@ -120,7 +120,7 @@ class AccountService:
         ]
 
     def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
-        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        max_concurrency = min(8, max(1, int(config.image_account_concurrency or 1)))
         return [
             token
             for token in self._list_ready_candidate_tokens(excluded_tokens)

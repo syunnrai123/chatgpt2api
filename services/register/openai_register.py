@@ -169,6 +169,18 @@ def _response_json(resp) -> dict:
         return {}
 
 
+def _response_body(resp, limit: int = 500) -> str:
+    if resp is None:
+        return ""
+    data = _response_json(resp)
+    if data:
+        return json.dumps(data, ensure_ascii=False)[:limit]
+    try:
+        return (resp.text or "")[:limit]
+    except Exception:
+        return ""
+
+
 def _decode_jwt_payload(token: str) -> dict:
     try:
         payload = token.split(".")[1]
@@ -578,12 +590,22 @@ class PlatformRegistrar:
             h.update(_make_trace_headers())
             return h
 
-        resp, error = request_with_local_retry(
-            login_session, "get",
-            f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
-            headers=_login_nav_headers(f"{platform_base}/"),
-            allow_redirects=True, verify=False
-        )
+        def _reset_login_auth_state() -> None:
+            for cookie in list(login_session.cookies):
+                if "auth.openai.com" in cookie.domain:
+                    login_session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
+            login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
+            login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
+
+        def _do_login_authorize():
+            return request_with_local_retry(
+                login_session, "get",
+                f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
+                headers=_login_nav_headers(f"{platform_base}/"),
+                allow_redirects=True, verify=False
+            )
+
+        resp, error = _do_login_authorize()
         if resp is None:
             raise RuntimeError(error or "platform_login_authorize_failed")
         step(index, "登录 authorize 完成")
@@ -605,18 +627,8 @@ class PlatformRegistrar:
         resp, error = _do_authorize_continue()
         if resp is not None and resp.status_code == 409:
             step(index, "邮箱提交 invalid_state，重新 authorize 后重试")
-            # 再次清除 cookie 并重新 authorize
-            for cookie in list(login_session.cookies):
-                if 'auth.openai.com' in cookie.domain:
-                    login_session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
-            login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
-            login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
-            resp, error = request_with_local_retry(
-                login_session, "get",
-                f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
-                headers=_login_nav_headers(f"{platform_base}/"),
-                allow_redirects=True, verify=False
-            )
+            _reset_login_auth_state()
+            resp, error = _do_login_authorize()
             if resp is None:
                 raise RuntimeError(error or "platform_login_authorize_retry_failed")
             resp, error = _do_authorize_continue()
@@ -631,26 +643,38 @@ class PlatformRegistrar:
         step(index, "邮箱提交完成")
 
         # 密码验证
+        def _do_password_verify():
+            headers = _login_json_headers(f"{auth_base}/log-in/password")
+            headers["openai-sentinel-token"] = build_sentinel_token(
+                login_session, login_device_id, "password_verify"
+            )
+            return request_with_local_retry(
+                login_session, "post",
+                f"{auth_base}/api/accounts/password/verify",
+                json={"password": password},
+                headers=headers,
+                allow_redirects=False,
+                verify=False
+            )
+
         step(index, "开始密码校验")
-        headers = _login_json_headers(f"{auth_base}/log-in/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(
-            login_session, login_device_id, "password_verify"
-        )
-        resp, error = request_with_local_retry(
-            login_session, "post",
-            f"{auth_base}/api/accounts/password/verify",
-            json={"password": password},
-            headers=headers,
-            allow_redirects=False,
-            verify=False
-        )
+        resp, error = _do_password_verify()
+        if resp is not None and resp.status_code == 409:
+            step(index, f"密码校验 409，重建登录态后重试: {_response_body(resp, 300)}", "yellow")
+            time.sleep(2)
+            _reset_login_auth_state()
+            resp, error = _do_login_authorize()
+            if resp is None:
+                raise RuntimeError(error or "platform_login_authorize_password_retry_failed")
+            resp, error = _do_authorize_continue()
+            if resp is None or resp.status_code != 200:
+                raise RuntimeError(
+                    error or f"email_submit_password_retry_http_{getattr(resp, 'status_code', 'unknown')}"
+                    + (f"_body={_response_body(resp)}" if resp is not None else "")
+                )
+            resp, error = _do_password_verify()
         if resp is None or resp.status_code != 200:
-            body = ""
-            try:
-                body = (resp.text or "")[:500] if resp is not None else ""
-            except Exception:
-                pass
-            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', '')}_body={body}")
+            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', '')}_body={_response_body(resp)}")
         step(index, "密码校验完成")
 
         payload = _response_json(resp)

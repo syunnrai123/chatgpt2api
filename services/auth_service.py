@@ -5,13 +5,16 @@ import hmac
 import secrets
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from threading import Lock
-from typing import Literal
+from typing import Any, Literal
 
 from services.config import config
 from services.storage.base import StorageBackend
 
 AuthRole = Literal["admin", "user"]
+ImageQuotaMode = Literal["generate", "edit"]
+QUOTA_SCALE = Decimal("0.000001")
 
 
 def _now_iso() -> str:
@@ -20,6 +23,31 @@ def _now_iso() -> str:
 
 def _hash_key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _quota_decimal(value: object, default: Decimal | str | int = Decimal("0")) -> Decimal:
+    try:
+        quota = Decimal(str(value if value is not None else default))
+    except (InvalidOperation, ValueError):
+        quota = Decimal(str(default))
+    if quota < 0:
+        quota = Decimal("0")
+    return quota.quantize(QUOTA_SCALE, rounding=ROUND_HALF_UP)
+
+
+def _quota_number(value: Decimal | object) -> float:
+    return float(_quota_decimal(value))
+
+
+def _reservation_id(value: object) -> str:
+    return str(value or "").strip()
+
+
+class ImageQuotaError(ValueError):
+    def __init__(self, message: str, *, required: float = 0, available: float = 0):
+        super().__init__(message)
+        self.required = required
+        self.available = available
 
 
 class AuthService:
@@ -50,15 +78,52 @@ class AuthService:
         name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
+        image_quota = _quota_decimal(raw.get("image_quota"))
+        image_quota_reservations = self._normalize_quota_reservations(raw.get("image_quota_reservations"))
+        image_quota_reserved = min(self._reserved_quota(image_quota_reservations), image_quota)
         return {
             "id": item_id,
             "name": name,
             "role": role,
             "key_hash": key_hash,
             "enabled": bool(raw.get("enabled", True)),
+            "image_quota": _quota_number(image_quota),
+            "image_quota_reserved": _quota_number(image_quota_reserved),
+            "image_quota_reservations": image_quota_reservations,
             "created_at": created_at,
             "last_used_at": last_used_at,
         }
+
+    @staticmethod
+    def _normalize_quota_reservations(raw: object) -> dict[str, dict[str, object]]:
+        source = raw if isinstance(raw, dict) else {}
+        reservations: dict[str, dict[str, object]] = {}
+        for raw_id, raw_item in source.items():
+            reservation_id = _reservation_id(raw_id)
+            item = raw_item if isinstance(raw_item, dict) else {}
+            cost = _quota_decimal(item.get("cost"))
+            if not reservation_id or cost <= 0:
+                continue
+            mode = "edit" if item.get("mode") == "edit" else "generate"
+            reservations[reservation_id] = {
+                "id": reservation_id,
+                "mode": mode,
+                "cost": _quota_number(cost),
+                "created_at": str(item.get("created_at") or _now_iso()),
+            }
+        return reservations
+
+    @staticmethod
+    def _active_reservations(item: dict[str, object]) -> dict[str, dict[str, object]]:
+        reservations = item.get("image_quota_reservations")
+        return AuthService._normalize_quota_reservations(reservations)
+
+    @staticmethod
+    def _reserved_quota(reservations: dict[str, dict[str, object]]) -> Decimal:
+        total = Decimal("0")
+        for item in reservations.values():
+            total += _quota_decimal(item.get("cost"))
+        return total
 
     def _load(self) -> list[dict[str, object]]:
         try:
@@ -77,7 +142,9 @@ class AuthService:
 
     @staticmethod
     def _public_item(item: dict[str, object]) -> dict[str, object]:
-        return {
+        image_quota = _quota_decimal(item.get("image_quota"))
+        image_quota_reserved = min(AuthService._reserved_quota(AuthService._active_reservations(item)), image_quota)
+        public = {
             "id": item.get("id"),
             "name": item.get("name"),
             "role": item.get("role"),
@@ -85,6 +152,13 @@ class AuthService:
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
         }
+        if item.get("role") == "user":
+            public.update({
+                "image_quota": _quota_number(image_quota),
+                "image_quota_reserved": _quota_number(image_quota_reserved),
+                "image_quota_available": _quota_number(max(Decimal("0"), image_quota - image_quota_reserved)),
+            })
+        return public
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
         with self._lock:
@@ -147,7 +221,7 @@ class AuthService:
             raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
         return candidate
 
-    def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
+    def create_key(self, *, role: AuthRole, name: str = "", image_quota: object = 0) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
@@ -164,6 +238,9 @@ class AuthService:
                 "role": role,
                 "key_hash": key_hash,
                 "enabled": True,
+                "image_quota": _quota_number(_quota_decimal(image_quota)) if role == "user" else 0,
+                "image_quota_reserved": 0,
+                "image_quota_reservations": {},
                 "created_at": _now_iso(),
                 "last_used_at": None,
             }
@@ -200,6 +277,140 @@ class AuthService:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
+                if "image_quota" in updates and updates.get("image_quota") is not None:
+                    next_quota = _quota_decimal(updates.get("image_quota"))
+                    reservations = self._active_reservations(next_item)
+                    next_item["image_quota"] = _quota_number(next_quota)
+                    next_item["image_quota_reserved"] = _quota_number(min(self._reserved_quota(reservations), next_quota))
+                    next_item["image_quota_reservations"] = reservations
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        return None
+
+    def recharge_key(self, key_id: str, amount: object, *, role: AuthRole | None = "user") -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        recharge_amount = _quota_decimal(amount)
+        if not normalized_id:
+            return None
+        if recharge_amount <= 0:
+            raise ValueError("充值额度必须大于 0")
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                if role is not None and item.get("role") != role:
+                    return None
+                next_item = dict(item)
+                next_item["image_quota"] = _quota_number(_quota_decimal(next_item.get("image_quota")) + recharge_amount)
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        return None
+
+    def _image_quota_multiplier(self, mode: ImageQuotaMode) -> Decimal:
+        raw_settings = config.get_image_quota_settings()
+        key = "edit_multiplier" if mode == "edit" else "generation_multiplier"
+        return _quota_decimal(raw_settings.get(key), Decimal("1"))
+
+    def image_quota_cost(self, *, mode: ImageQuotaMode, count: object = 1) -> float:
+        try:
+            image_count = int(count or 1)
+        except (TypeError, ValueError):
+            image_count = 1
+        image_count = max(1, image_count)
+        return _quota_number(self._image_quota_multiplier(mode) * Decimal(image_count))
+
+    def reserve_image_quota(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: ImageQuotaMode,
+        count: object = 1,
+        reservation_id: str = "",
+    ) -> dict[str, Any] | None:
+        if identity.get("role") != "user":
+            return None
+        key_id = self._clean(identity.get("id"))
+        if not key_id:
+            raise ImageQuotaError("密钥无效或已失效，请重新登录")
+        cost = _quota_decimal(self.image_quota_cost(mode=mode, count=count))
+        normalized_reservation_id = _reservation_id(reservation_id) or uuid.uuid4().hex
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != key_id or item.get("role") != "user":
+                    continue
+                if not bool(item.get("enabled", True)):
+                    raise ImageQuotaError("密钥无效或已失效，请重新登录")
+                reservations = self._active_reservations(item)
+                existing = reservations.get(normalized_reservation_id)
+                if existing is not None:
+                    return dict(existing, key_id=key_id)
+                balance = _quota_decimal(item.get("image_quota"))
+                reserved = min(self._reserved_quota(reservations), balance)
+                available = max(Decimal("0"), balance - reserved)
+                if available < cost:
+                    raise ImageQuotaError(
+                        "图片额度不足，请联系管理员充值",
+                        required=_quota_number(cost),
+                        available=_quota_number(available),
+                    )
+                next_item = dict(item)
+                reservation = {
+                    "id": normalized_reservation_id,
+                    "key_id": key_id,
+                    "mode": mode,
+                    "cost": _quota_number(cost),
+                    "created_at": _now_iso(),
+                }
+                reservations[normalized_reservation_id] = {key: value for key, value in reservation.items() if key != "key_id"}
+                next_item["image_quota_reservations"] = reservations
+                next_item["image_quota_reserved"] = _quota_number(self._reserved_quota(reservations))
+                self._items[index] = next_item
+                self._save()
+                return reservation
+        raise ImageQuotaError("密钥无效或已失效，请重新登录")
+
+    def confirm_image_quota(self, reservation: dict[str, Any] | None) -> dict[str, object] | None:
+        return self._finish_image_quota_reservation(reservation, charge=True)
+
+    def refund_image_quota(self, reservation: dict[str, Any] | None) -> dict[str, object] | None:
+        return self._finish_image_quota_reservation(reservation, charge=False)
+
+    def _finish_image_quota_reservation(self, reservation: dict[str, Any] | None, *, charge: bool) -> dict[str, object] | None:
+        if not reservation:
+            return None
+        key_id = self._clean(reservation.get("key_id"))
+        normalized_reservation_id = _reservation_id(reservation.get("id"))
+        if not key_id or not normalized_reservation_id:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != key_id:
+                    continue
+                reservations = self._active_reservations(item)
+                active = reservations.pop(normalized_reservation_id, None)
+                if active is None:
+                    return self._public_item(item)
+                cost = _quota_decimal(active.get("cost"))
+                if cost <= 0:
+                    next_item = dict(item)
+                    next_balance = _quota_decimal(item.get("image_quota"))
+                    next_item["image_quota_reserved"] = _quota_number(min(self._reserved_quota(reservations), next_balance))
+                    next_item["image_quota_reservations"] = reservations
+                    self._items[index] = next_item
+                    self._save()
+                    return self._public_item(next_item)
+                balance = _quota_decimal(item.get("image_quota"))
+                next_item = dict(item)
+                next_balance = max(Decimal("0"), balance - cost) if charge else balance
+                next_reserved = self._reserved_quota(reservations)
+                next_item["image_quota"] = _quota_number(next_balance)
+                next_item["image_quota_reserved"] = _quota_number(min(next_reserved, next_balance))
+                next_item["image_quota_reservations"] = reservations
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)

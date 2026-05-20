@@ -19,8 +19,12 @@ class FakeImageTaskService:
     def __init__(self):
         self.generation_calls = []
         self.edit_calls = []
+        self.tasks = {}
+        self.generation_error = None
 
     def submit_generation(self, identity, **kwargs):
+        if self.generation_error is not None:
+            raise self.generation_error
         self.generation_calls.append((identity, kwargs))
         return {
             "id": kwargs["client_task_id"],
@@ -31,15 +35,36 @@ class FakeImageTaskService:
             "data": [{"url": f"{kwargs['base_url']}/images/fake.png"}],
         }
 
-    def submit_edit(self, identity, **kwargs):
+    def get_task(self, _identity, task_id):
+        return self.tasks.get(task_id)
+
+    def prepare_edit(self, identity, **kwargs):
+        task_id = kwargs["client_task_id"]
+        task = self.tasks.get(task_id)
+        if task is not None:
+            return {**task, "_created": False}
+        task = {
+            "id": task_id,
+            "status": "queued",
+            "mode": "edit",
+            "created_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00",
+        }
+        self.tasks[task_id] = task
+        return {**task, "_created": True}
+
+    def start_prepared_edit(self, identity, **kwargs):
         self.edit_calls.append((identity, kwargs))
-        return {
+        task = {
+            **self.tasks.get(kwargs["client_task_id"], {}),
             "id": kwargs["client_task_id"],
             "status": "queued",
             "mode": "edit",
             "created_at": "2026-01-01 00:00:00",
             "updated_at": "2026-01-01 00:00:00",
         }
+        self.tasks[kwargs["client_task_id"]] = task
+        return task
 
     def list_tasks(self, _identity, ids):
         return {
@@ -81,6 +106,18 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(payload["id"], "task-1")
         self.assertEqual(payload["status"], "success")
         self.assertEqual(len(self.fake_service.generation_calls), 1)
+
+    def test_create_generation_task_queue_full_returns_503(self):
+        self.fake_service.generation_error = RuntimeError("图片任务队列已满，请稍后重试")
+
+        response = self.client.post(
+            "/api/image-tasks/generations",
+            headers=AUTH_HEADERS,
+            json={"client_task_id": "task-queue-full", "prompt": "cat", "model": "gpt-image-2"},
+        )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["error"], "图片任务队列已满，请稍后重试")
 
     def test_create_edit_task_accepts_multiple_images(self):
         """测试图片编辑任务接口支持多个上传图片。"""

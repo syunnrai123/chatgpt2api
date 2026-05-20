@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -8,6 +10,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
+from services.image_quota import ImageQuotaError
 from services.log_service import LoggedCall
 
 
@@ -28,6 +31,32 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
+
+
+def _raise_quota_error(exc: ImageQuotaError) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "error": str(exc),
+            "required": exc.required,
+            "available": exc.available,
+        },
+    ) from exc
+
+
+def _task_error_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            return str(detail.get("error") or detail)
+        return str(detail or "图片读取失败")
+    return str(exc) or "图片读取失败"
+
+
+def _raise_task_runtime_error(exc: RuntimeError) -> None:
+    message = str(exc) or "图片任务提交失败"
+    status_code = 503 if "队列已满" in message or "queue" in message.lower() else 502
+    raise HTTPException(status_code=status_code, detail={"error": message}) from exc
 
 
 def create_router() -> APIRouter:
@@ -59,8 +88,12 @@ def create_router() -> APIRouter:
                 size=body.size,
                 base_url=resolve_image_base_url(request),
             )
+        except ImageQuotaError as exc:
+            _raise_quota_error(exc)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except RuntimeError as exc:
+            _raise_task_runtime_error(exc)
 
     @router.post("/api/image-tasks/edits")
     async def create_edit_task(
@@ -75,10 +108,36 @@ def create_router() -> APIRouter:
         prompt = str(payload["prompt"])
         model = str(payload["model"])
         await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
-        images = await read_image_sources(image_sources)
+        existing = await run_in_threadpool(image_task_service.get_task, identity, client_task_id)
+        if existing is not None:
+            return existing
+        try:
+            prepared = await run_in_threadpool(
+                image_task_service.prepare_edit,
+                identity,
+                client_task_id=client_task_id,
+                prompt=prompt,
+                model=model,
+                size=payload["size"],
+                count=payload.get("n"),
+            )
+        except ImageQuotaError as exc:
+            _raise_quota_error(exc)
+        if not bool(prepared.pop("_created", False)):
+            return prepared
+        try:
+            images = await read_image_sources(image_sources)
+        except asyncio.CancelledError:
+            try:
+                image_task_service.fail_task(identity, client_task_id, "请求已取消，图片读取未完成")
+            finally:
+                raise
+        except Exception as exc:
+            await run_in_threadpool(image_task_service.fail_task, identity, client_task_id, _task_error_message(exc))
+            raise
         try:
             return await run_in_threadpool(
-                image_task_service.submit_edit,
+                image_task_service.start_prepared_edit,
                 identity,
                 client_task_id=client_task_id,
                 prompt=prompt,
@@ -86,8 +145,13 @@ def create_router() -> APIRouter:
                 size=payload["size"],
                 base_url=resolve_image_base_url(request),
                 images=images,
+                count=payload.get("n"),
             )
+        except ImageQuotaError as exc:
+            _raise_quota_error(exc)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except RuntimeError as exc:
+            _raise_task_runtime_error(exc)
 
     return router

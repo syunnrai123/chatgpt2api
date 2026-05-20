@@ -34,12 +34,17 @@ from services.sub2api_service import (
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    image_quota: float = Field(default=0, ge=0)
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     key: str | None = None
+
+
+class UserKeyRechargeRequest(BaseModel):
+    amount: float = Field(..., gt=0)
 
 
 class AccountCreateRequest(BaseModel):
@@ -154,7 +159,7 @@ def create_router() -> APIRouter:
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            item, raw_key = auth_service.create_key(role="user", name=body.name)
+            item, raw_key = auth_service.create_key(role="user", name=body.name, image_quota=body.image_quota)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
@@ -191,6 +196,21 @@ def create_router() -> APIRouter:
         if not auth_service.delete_key(key_id, role="user"):
             raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
         return {"items": auth_service.list_keys(role="user")}
+
+    @router.post("/api/auth/users/{key_id}/quota")
+    async def recharge_user_key_quota(
+            key_id: str,
+            body: UserKeyRechargeRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            item = auth_service.recharge_key(key_id, body.amount, role="user")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+        return {"item": item, "items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
