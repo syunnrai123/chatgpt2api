@@ -12,7 +12,8 @@ from fastapi import HTTPException
 from services.image_limits import parse_image_count_limit
 from utils.log import logger
 
-IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
+IMAGE_MODELS = {DEFAULT_IMAGE_MODEL, "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
@@ -100,7 +101,14 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     modalities = body.get("modalities")
     if model in IMAGE_MODELS:
         return True
+    if has_image_generation_tool(body):
+        return True
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
+
+
+def normalize_image_model(model: object) -> str:
+    model_name = str(model or "").strip()
+    return DEFAULT_IMAGE_MODEL if not model_name or model_name == "auto" else model_name
 
 
 def _data_image_url(value: object) -> bool:
@@ -304,7 +312,7 @@ def extract_response_prompt(input_value: object) -> str:
     return "\n".join(prompt_parts).strip()
 
 
-def has_response_image_generation_tool(body: dict[str, object]) -> bool:
+def has_image_generation_tool(body: dict[str, object]) -> bool:
     tools = body.get("tools")
     if isinstance(tools, list):
         for tool in tools:
@@ -312,6 +320,10 @@ def has_response_image_generation_tool(body: dict[str, object]) -> bool:
                 return True
     tool_choice = body.get("tool_choice")
     return isinstance(tool_choice, dict) and str(tool_choice.get("type") or "").strip() == "image_generation"
+
+
+def has_response_image_generation_tool(body: dict[str, object]) -> bool:
+    return has_image_generation_tool(body)
 
 
 def extract_prompt_from_message_content(content: object) -> str:

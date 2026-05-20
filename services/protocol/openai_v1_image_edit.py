@@ -10,12 +10,13 @@ from services.protocol.conversation import (
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
+from utils.helper import normalize_image_model
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     prompt = str(body.get("prompt") or "")
     images = body.get("images") or []
-    model = str(body.get("model") or "gpt-image-2")
+    model = normalize_image_model(body.get("model"))
     n = int(body.get("n") or 1)
     size = body.get("size")
     response_format = str(body.get("response_format") or "b64_json")

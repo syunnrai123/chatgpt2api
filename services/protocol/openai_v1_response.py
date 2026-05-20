@@ -15,7 +15,7 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
-from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
+from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool, normalize_image_model
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
@@ -192,7 +192,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     prompt = extract_response_prompt(body.get("input"))
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})
-    model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    model = normalize_image_model(body.get("model"))
     image_info = extract_response_image(body.get("input"))
     if image_info:
         image_data, mime_type = image_info
