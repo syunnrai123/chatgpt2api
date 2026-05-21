@@ -7,6 +7,7 @@ from services.protocol.conversation import (
     ImageGenerationError,
     collect_image_outputs,
     encode_images,
+    image_request_options,
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
@@ -18,8 +19,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     images = body.get("images") or []
     model = normalize_image_model(body.get("model"))
     n = int(body.get("n") or 1)
-    size = body.get("size")
-    resolution = body.get("resolution")
+    size, resolution = image_request_options(body)
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     encoded_images = encode_images(images)

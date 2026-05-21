@@ -30,6 +30,7 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     size: str | None = None
     resolution: str | None = None
+    params: dict[str, object] | None = None
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None

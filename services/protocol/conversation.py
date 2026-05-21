@@ -5,8 +5,10 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Iterable, Iterator
 
+from PIL import Image
 import tiktoken
 
 from services.account_service import account_service
@@ -138,10 +140,112 @@ def normalize_image_resolution(value: object) -> str:
     return text if text in {"1k", "2k", "4k"} else ""
 
 
+IMAGE_SIZE_MAP: dict[str, dict[str, tuple[int, int]]] = {
+    "1k": {
+        "1:1": (1024, 1024),
+        "4:3": (1152, 864),
+        "3:4": (864, 1152),
+        "16:9": (1344, 768),
+        "9:16": (768, 1344),
+    },
+    "2k": {
+        "1:1": (1248, 1248),
+        "3:2": (1536, 1024),
+        "2:3": (1024, 1536),
+        "4:3": (1440, 1088),
+        "3:4": (1088, 1440),
+        "16:9": (1664, 928),
+        "9:16": (928, 1664),
+        "21:9": (1904, 816),
+    },
+    "4k": {
+        "1:1": (2480, 2480),
+        "3:2": (3056, 2032),
+        "2:3": (2032, 3056),
+        "4:3": (2880, 2160),
+        "3:4": (2160, 2880),
+        "16:9": (3312, 1872),
+        "9:16": (1872, 3312),
+        "21:9": (3808, 1632),
+    },
+}
+
+
+def parse_image_size_dimensions(value: object) -> tuple[int, int] | None:
+    text = str(value or "").strip().lower()
+    match = re.fullmatch(r"(\d{2,5})\s*[x×]\s*(\d{2,5})", text)
+    if not match:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def normalize_image_ratio(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "21:9"}:
+        return text
+    dimensions = parse_image_size_dimensions(value)
+    if dimensions is None:
+        return ""
+    width, height = dimensions
+    ratio = width / height
+    known = {
+        "1:1": 1.0,
+        "3:2": 3 / 2,
+        "2:3": 2 / 3,
+        "4:3": 4 / 3,
+        "3:4": 3 / 4,
+        "16:9": 16 / 9,
+        "9:16": 9 / 16,
+        "21:9": 21 / 9,
+    }
+    best = min(known, key=lambda item: abs(known[item] - ratio))
+    return best if abs(known[best] - ratio) <= 0.03 else ""
+
+
+def image_output_dimensions(size: object = None, resolution: object = None) -> tuple[int, int] | None:
+    normalized_resolution = normalize_image_resolution(resolution)
+    ratio = normalize_image_ratio(size)
+    if not normalized_resolution or not ratio:
+        return None
+    return IMAGE_SIZE_MAP.get(normalized_resolution, {}).get(ratio)
+
+
+def image_output_size(size: object = None, resolution: object = None) -> str:
+    dimensions = image_output_dimensions(size, resolution)
+    return f"{dimensions[0]}x{dimensions[1]}" if dimensions else ""
+
+
+def infer_image_resolution_from_size(size: object) -> str:
+    dimensions = parse_image_size_dimensions(size)
+    if dimensions is None:
+        return ""
+    width, height = dimensions
+    area = width * height
+    if area >= 4_000_000:
+        return "4k"
+    if area >= 1_400_000:
+        return "2k"
+    return "1k"
+
+
+def image_request_options(body: dict[str, Any]) -> tuple[object, object]:
+    params = body.get("params")
+    params = params if isinstance(params, dict) else {}
+    size = body.get("size") or body.get("aspect_ratio") or params.get("size") or params.get("aspect_ratio")
+    resolution = body.get("resolution") or body.get("size_tier") or params.get("resolution") or params.get("size_tier")
+    resolution = resolution or infer_image_resolution_from_size(size)
+    return size, resolution
+
+
 def build_image_prompt(prompt: str, size: str | None, resolution: str | None = None) -> str:
     hints: list[str] = []
     if size:
-        if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
+        size_text = str(size).strip()
+        size_dimensions = parse_image_size_dimensions(size_text)
+        if size_dimensions is not None:
+            hints.append(f"输出图片目标尺寸为 {size_dimensions[0]}x{size_dimensions[1]}。")
+        elif size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
             hints.append(f"输出图片，宽高比为 {size}。")
         else:
             hints.append({
@@ -153,11 +257,12 @@ def build_image_prompt(prompt: str, size: str | None, resolution: str | None = N
             }[size])
     normalized_resolution = normalize_image_resolution(resolution)
     if normalized_resolution:
+        requested_size = image_output_size(size, normalized_resolution)
         hints.append({
-            "1k": "优先尝试 1K 清晰度偏好，长边约 1024 像素，画面干净清晰。",
-            "2k": "优先尝试 2K 清晰度偏好，长边约 2048 像素，保留更多纹理和细节。",
-            "4k": "优先尝试 4K 清晰度偏好，长边约 4096 像素，尽可能提供高分辨率和精细纹理。",
-        }[normalized_resolution])
+            "1k": "优先尝试 1K 清晰度偏好，画面干净清晰。",
+            "2k": "优先尝试 2K 清晰度偏好，保留更多纹理和细节。",
+            "4k": "优先尝试 4K 清晰度偏好，尽可能提供高分辨率和精细纹理。",
+        }[normalized_resolution] + (f" 目标输出尺寸为 {requested_size}。" if requested_size else ""))
     if not hints:
         return prompt
     return f"{prompt.strip()}\n\n" + "\n".join(hints)
@@ -220,6 +325,72 @@ def format_image_result(
     if message and not data:
         result["message"] = message
     return result
+
+
+def image_byte_dimensions(image_data: bytes) -> tuple[int, int]:
+    with Image.open(BytesIO(image_data)) as image:
+        return image.size
+
+
+def image_resolution_min_area(resolution: object) -> int | None:
+    normalized_resolution = normalize_image_resolution(resolution)
+    if normalized_resolution == "2k":
+        return int(1_500_000 * 0.98)
+    if normalized_resolution == "4k":
+        return int(6_000_000 * 0.98)
+    return None
+
+
+def ensure_requested_image_resolution(image_data: bytes, size: object, resolution: object) -> None:
+    normalized_resolution = normalize_image_resolution(resolution)
+    if normalized_resolution not in {"2k", "4k"}:
+        return
+    width, height = image_byte_dimensions(image_data)
+    requested_dimensions = parse_image_size_dimensions(size)
+    if requested_dimensions is not None:
+        min_width = int(requested_dimensions[0] * 0.98)
+        min_height = int(requested_dimensions[1] * 0.98)
+        if width >= min_width and height >= min_height:
+            return
+        requested_size = f"{requested_dimensions[0]}x{requested_dimensions[1]}"
+        actual_size = f"{width}x{height}"
+        raise ImageGenerationError(
+            f"requested resolution {normalized_resolution.upper()} was not satisfied by upstream image size "
+            f"{actual_size}; requested size is {requested_size}. 已触发清晰度降级重试。",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="image_resolution_unavailable",
+            param="resolution",
+        )
+    target = image_output_dimensions(size, normalized_resolution)
+    if not target:
+        min_area = image_resolution_min_area(normalized_resolution)
+        if min_area is None or width * height >= min_area:
+            return
+        requested_size = f"{normalized_resolution.upper()} tier"
+        actual_size = f"{width}x{height}"
+        raise ImageGenerationError(
+            f"requested resolution {normalized_resolution.upper()} was not satisfied by upstream image size "
+            f"{actual_size}; requested size is {requested_size}. 已触发清晰度降级重试。",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="image_resolution_unavailable",
+            param="resolution",
+        )
+    min_width = int(target[0] * 0.98)
+    min_height = int(target[1] * 0.98)
+    if width >= min_width and height >= min_height:
+        return
+    requested_size = f"{target[0]}x{target[1]}"
+    actual_size = f"{width}x{height}"
+    raise ImageGenerationError(
+        f"requested resolution {normalized_resolution.upper()} was not satisfied by upstream image size "
+        f"{actual_size}; requested size is {requested_size}. 已触发清晰度降级重试。",
+        status_code=400,
+        error_type="invalid_request_error",
+        code="image_resolution_unavailable",
+        param="resolution",
+    )
 
 
 @dataclass
@@ -608,10 +779,10 @@ def stream_image_outputs(
 
     image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
     if image_urls:
-        image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
-        ]
+        downloaded_images = backend.download_image_bytes(image_urls)
+        for image_data in downloaded_images:
+            ensure_requested_image_resolution(image_data, request.size, request.resolution)
+        image_items = [{"b64_json": base64.b64encode(image_data).decode("ascii")} for image_data in downloaded_images]
         data = format_image_result(
             image_items,
             request.prompt,

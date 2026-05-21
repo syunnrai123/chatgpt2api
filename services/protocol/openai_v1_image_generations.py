@@ -5,6 +5,7 @@ from typing import Any, Iterator
 from services.protocol.conversation import (
     ConversationRequest,
     collect_image_outputs,
+    image_request_options,
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
@@ -15,8 +16,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     prompt = str(body.get("prompt") or "")
     model = normalize_image_model(body.get("model"))
     n = int(body.get("n") or 1)
-    size = body.get("size")
-    resolution = body.get("resolution")
+    size, resolution = image_request_options(body)
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     outputs = stream_image_outputs_with_pool(ConversationRequest(

@@ -11,6 +11,7 @@ from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
     encode_images,
+    image_request_options,
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
@@ -95,6 +96,32 @@ def image_output_items(prompt: str, data: list[dict[str, Any]], item_id: str | N
                 "revised_prompt": str(item.get("revised_prompt") or prompt).strip() or prompt,
             })
     return output
+
+
+def image_generation_tool_options(body: dict[str, Any]) -> tuple[object, object]:
+    options: dict[str, Any] = {}
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict) and str(tool.get("type") or "").strip() == "image_generation":
+                params = tool.get("params")
+                if isinstance(params, dict):
+                    options.update(params)
+                options.update({key: value for key, value in tool.items() if key != "params"})
+                break
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, dict) and str(tool_choice.get("type") or "").strip() == "image_generation":
+        params = tool_choice.get("params")
+        if isinstance(params, dict):
+            options.update(params)
+        options.update({key: value for key, value in tool_choice.items() if key != "params"})
+    params = body.get("params")
+    if isinstance(params, dict):
+        options.update(params)
+    for key in ("size", "resolution", "size_tier", "aspect_ratio"):
+        if body.get(key):
+            options[key] = body.get(key)
+    return image_request_options(options)
 
 
 def response_created(response_id: str, model: str, created: int) -> dict[str, Any]:
@@ -199,10 +226,12 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         images = encode_images([(image_data, "image.png", mime_type)])
     else:
         images = None
+    size, resolution = image_generation_tool_options(body)
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
-        size=None if images else "1:1",
+        size=size or (None if images else "1:1"),
+        resolution=resolution,
         response_format="b64_json",
         images=images,
     ))
