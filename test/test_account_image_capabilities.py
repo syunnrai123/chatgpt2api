@@ -29,6 +29,38 @@ class AccountCapabilityTests(unittest.TestCase):
             )
         )
 
+    def test_2k_and_4k_require_non_free_image_account(self) -> None:
+        self.assertTrue(AccountService._supports_image_resolution({"type": "free"}, "1k"))
+        self.assertFalse(AccountService._supports_image_resolution({"type": "free"}, "2k"))
+        self.assertFalse(AccountService._supports_image_resolution({"type": "free"}, "4k"))
+        self.assertTrue(AccountService._supports_image_resolution({"type": "Plus"}, "2k"))
+        self.assertTrue(AccountService._supports_image_resolution({"type": "Pro"}, "4k"))
+
+    def test_get_available_access_token_filters_free_accounts_for_2k_and_4k(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "free-token", "type": "free", "quota": 1, "status": "正常"},
+                {"access_token": "plus-token", "type": "Plus", "quota": 1, "status": "正常"},
+            ])
+            service.fetch_remote_info = lambda token, _event: service.get_account(token)
+
+            token = service.get_available_access_token("4k")
+
+            self.assertEqual(token, "plus-token")
+            service.release_image_slot(token)
+
+    def test_get_available_access_token_rejects_2k_when_only_free_accounts_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "free-token", "type": "free", "quota": 1, "status": "正常"},
+            ])
+            service.fetch_remote_info = lambda token, _event: service.get_account(token)
+
+            with self.assertRaisesRegex(RuntimeError, "non-free account"):
+                service.get_available_access_token("2k")
+
     def test_prolite_variants_are_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))

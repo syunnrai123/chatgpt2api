@@ -109,6 +109,14 @@ class AccountService:
         return int(account.get("quota") or 0) > 0
 
     @staticmethod
+    def _supports_image_resolution(account: dict, resolution: object = None) -> bool:
+        normalized_resolution = str(resolution or "").strip().lower()
+        if normalized_resolution not in {"2k", "4k"}:
+            return True
+        account_type = str((account or {}).get("type") or "free").strip().lower()
+        return bool(account_type) and account_type != "free"
+
+    @staticmethod
     def _normalize_account_type(value: Any, *, allow_unknown: bool = False) -> str:
         if isinstance(value, (dict, list, tuple, set)):
             return ""
@@ -168,30 +176,48 @@ class AccountService:
         with self._lock:
             return list(self._accounts)
 
-    def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_ready_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        resolution: object = None,
+    ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
             token
             for item in self._accounts.values()
             if self._is_image_account_available(item)
+               and self._supports_image_resolution(item, resolution)
                and (token := item.get("access_token") or "")
                and token not in excluded
         ]
 
-    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_available_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        resolution: object = None,
+    ) -> list[str]:
         max_concurrency = min(8, max(1, int(config.image_account_concurrency or 1)))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens)
+            for token in self._list_ready_candidate_tokens(excluded_tokens, resolution=resolution)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
-    def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def _acquire_next_candidate_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        resolution: object = None,
+    ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens):
+                if not self._list_ready_candidate_tokens(excluded_tokens, resolution=resolution):
+                    if str(resolution or "").strip().lower() in {"2k", "4k"}:
+                        raise RuntimeError("requested resolution is only available for non-free account types")
                     raise RuntimeError("no available image quota")
-                tokens = self._list_available_candidate_tokens(excluded_tokens)
+                tokens = self._list_available_candidate_tokens(excluded_tokens, resolution=resolution)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -210,17 +236,17 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self) -> str:
+    def get_available_access_token(self, resolution: object = None) -> str:
         attempted_tokens: set[str] = set()
         while True:
-            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens, resolution=resolution)
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
             except Exception:
                 self.release_image_slot(access_token)
                 continue
-            if self._is_image_account_available(account or {}):
+            if self._is_image_account_available(account or {}) and self._supports_image_resolution(account or {}, resolution):
                 return access_token
             self.release_image_slot(access_token)
 

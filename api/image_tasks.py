@@ -19,6 +19,7 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+    resolution: str | None = None
 
 
 def _parse_task_ids(value: str) -> list[str]:
@@ -86,6 +87,7 @@ def create_router() -> APIRouter:
                 prompt=body.prompt,
                 model=body.model,
                 size=body.size,
+                resolution=body.resolution,
                 base_url=resolve_image_base_url(request),
             )
         except ImageQuotaError as exc:
@@ -119,6 +121,7 @@ def create_router() -> APIRouter:
                 prompt=prompt,
                 model=model,
                 size=payload["size"],
+                resolution=payload.get("resolution"),
                 count=payload.get("n"),
             )
         except ImageQuotaError as exc:
@@ -143,6 +146,7 @@ def create_router() -> APIRouter:
                 prompt=prompt,
                 model=model,
                 size=payload["size"],
+                resolution=payload.get("resolution"),
                 base_url=resolve_image_base_url(request),
                 images=images,
                 count=payload.get("n"),

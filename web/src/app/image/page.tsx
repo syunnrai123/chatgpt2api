@@ -24,6 +24,7 @@ import {
     fetchCurrentIdentity,
     fetchImageTasks,
     type Account,
+    type ImageResolution,
     type ImageTask,
 } from "@/lib/api";
 import {useAuthGuard} from "@/lib/use-auth-guard";
@@ -44,9 +45,73 @@ import {
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
+const IMAGE_RESOLUTION_STORAGE_KEY = "chatgpt2api:image_last_resolution";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
 const SUBMIT_IMAGE_TASK_CONCURRENCY = 4;
 const DEFAULT_MAX_IMAGES_PER_TASK = 20;
+const IMAGE_RESOLUTION_ORDER: ImageResolution[] = ["1k", "2k", "4k"];
+const RESOLUTION_FALLBACK_ERROR_PATTERNS = [
+    /resolution/i,
+    /high[-\s]?res/i,
+    /pixel/i,
+    /dimension/i,
+    /image size/i,
+    /requested size/i,
+    /maximum.*resolution/i,
+    /4k/i,
+    /2k/i,
+    /分辨率/,
+    /清晰度/,
+    /像素/,
+    /尺寸/,
+];
+const NON_RESOLUTION_FALLBACK_ERROR_PATTERNS = [
+    /content.*policy/i,
+    /policy.*violation/i,
+    /safety/i,
+    /quota/i,
+    /rate.?limit/i,
+    /queue/i,
+    /auth/i,
+    /token/i,
+    /账号/,
+    /额度/,
+    /限流/,
+    /队列/,
+    /认证/,
+    /封禁/,
+    /敏感/,
+    /安全/,
+];
+
+function normalizeImageResolution(value: unknown): ImageResolution {
+    const text = String(value || "").trim().toLowerCase();
+    return text === "2k" || text === "4k" ? text : "1k";
+}
+
+function imageResolutionLabel(value: ImageResolution) {
+    return value.toUpperCase();
+}
+
+function nextLowerImageResolution(value: unknown): ImageResolution | null {
+    const index = IMAGE_RESOLUTION_ORDER.indexOf(normalizeImageResolution(value));
+    return index > 0 ? IMAGE_RESOLUTION_ORDER[index - 1] : null;
+}
+
+function isResolutionFallbackError(message: unknown) {
+    const text = String(message || "").trim();
+    if (!text) {
+        return false;
+    }
+    return (
+        RESOLUTION_FALLBACK_ERROR_PATTERNS.some((pattern) => pattern.test(text)) &&
+        !NON_RESOLUTION_FALLBACK_ERROR_PATTERNS.some((pattern) => pattern.test(text))
+    );
+}
+
+function fallbackTaskId(imageId: string, resolution: ImageResolution) {
+    return `${imageId}-${resolution}-${createId()}`;
+}
 
 function normalizeMaxImageCount(value: unknown) {
     const parsed = Math.floor(Number(value));
@@ -381,6 +446,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
     const [imagePrompt, setImagePrompt] = useState("");
     const [imageCount, setImageCount] = useState("1");
     const [imageSize, setImageSize] = useState("");
+    const [imageResolution, setImageResolution] = useState<ImageResolution>("1k");
     const [isHistoryOpen, setIsHistoryOpen] = useState(false);
     const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
     const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
@@ -445,8 +511,10 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
         const loadHistory = async () => {
             try {
                 const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
+                const storedResolution = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_RESOLUTION_STORAGE_KEY) : null;
                 const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
                 setImageSize(storedSize || "");
+                setImageResolution(normalizeImageResolution(storedResolution));
                 setImageCount(storedCount || "1");
 
                 const items = await listImageConversations();
@@ -553,6 +621,12 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
         }
         window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
     }, [imageSize]);
+
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            window.localStorage.setItem(IMAGE_RESOLUTION_STORAGE_KEY, imageResolution);
+        }
+    }, [imageResolution]);
 
     useEffect(() => {
         if (typeof window !== "undefined" && isMaxImageCountLoaded && parsedCount > 0) {
@@ -829,6 +903,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
         setImagePrompt(turn.prompt);
         setImageCount(clampImageCount(String(turn.count || turn.images.length || 1), maxImageCount));
         setImageSize(turn.size);
+        setImageResolution(normalizeImageResolution(turn.resolution));
         setReferenceImages(turn.referenceImages);
         setReferenceImageFiles(
             turn.referenceImages.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)),
@@ -850,12 +925,13 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
         setLightboxOpen(true);
     }, []);
 
-    const createLoadingImages = (turnId: string, count: number) =>
+    const createLoadingImages = (turnId: string, count: number, resolution: ImageResolution) =>
         Array.from({length: count}, (_, index) => {
             const imageId = `${turnId}-${index}`;
             return {
                 id: imageId,
                 taskId: imageId,
+                resolution,
                 status: "loading" as const,
             };
         });
@@ -878,8 +954,17 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             }
 
             activeConversationQueueIds.add(conversationId);
-            const applyTasks = async (tasks: ImageTask[]) => {
-                const taskMap = new Map(tasks.map((task) => [task.id, task]));
+            const applyResolutionFallbacks = async (
+                fallbacks: Array<{
+                    taskId: string;
+                    currentResolution: ImageResolution;
+                    nextResolution: ImageResolution;
+                }>,
+            ) => {
+                if (fallbacks.length === 0) {
+                    return;
+                }
+                const fallbackMap = new Map(fallbacks.map((item) => [item.taskId, item]));
                 await updateConversation(conversationId, (current) => {
                     const conversation = current ?? snapshot;
                     const turns = conversation.turns.map((turn) => {
@@ -888,8 +973,17 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                         }
                         const images = turn.images.map((image) => {
                             const taskId = image.taskId || image.id;
-                            const task = taskMap.get(taskId);
-                            return task ? taskDataToStoredImage({...image, taskId}, task) : image;
+                            const fallback = fallbackMap.get(taskId);
+                            if (!fallback || image.status !== "loading") {
+                                return image;
+                            }
+                            return {
+                                ...image,
+                                taskId: fallbackTaskId(image.id, fallback.nextResolution),
+                                resolution: fallback.nextResolution,
+                                status: "loading" as const,
+                                error: undefined,
+                            };
                         });
                         const derived = deriveTurnStatus({...turn, status: "generating", images});
                         return {
@@ -904,6 +998,56 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                         turns,
                     };
                 });
+                const messages = fallbacks.map(
+                    (item) =>
+                        `当前清晰度偏好不可用，已从 ${imageResolutionLabel(item.currentResolution)} 降级到 ${imageResolutionLabel(item.nextResolution)} 重新生成`,
+                );
+                Array.from(new Set(messages)).forEach((message) => toast.warning(message));
+            };
+            const applyTasks = async (tasks: ImageTask[]) => {
+                const taskMap = new Map(tasks.map((task) => [task.id, task]));
+                const resolutionFallbacks: Array<{
+                    taskId: string;
+                    currentResolution: ImageResolution;
+                    nextResolution: ImageResolution;
+                }> = [];
+                await updateConversation(conversationId, (current) => {
+                    const conversation = current ?? snapshot;
+                    const turns = conversation.turns.map((turn) => {
+                        if (turn.id !== activeTurn.id) {
+                            return turn;
+                        }
+                        const images = turn.images.map((image) => {
+                            const taskId = image.taskId || image.id;
+                            const task = taskMap.get(taskId);
+                            if (!task) {
+                                return image;
+                            }
+                            const currentResolution = normalizeImageResolution(image.resolution || turn.resolution);
+                            const nextResolution =
+                                task.status === "error" && isResolutionFallbackError(task.error)
+                                    ? nextLowerImageResolution(currentResolution)
+                                    : null;
+                            if (nextResolution) {
+                                resolutionFallbacks.push({taskId, currentResolution, nextResolution});
+                                return image;
+                            }
+                            return taskDataToStoredImage({...image, taskId, resolution: currentResolution}, task);
+                        });
+                        const derived = deriveTurnStatus({...turn, status: "generating", images});
+                        return {
+                            ...turn,
+                            ...derived,
+                            images,
+                        };
+                    });
+                    return {
+                        ...conversation,
+                        updatedAt: new Date().toISOString(),
+                        turns,
+                    };
+                });
+                await applyResolutionFallbacks(resolutionFallbacks);
             };
 
             try {
@@ -976,20 +1120,32 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                 const submitImageTasks = async (images: StoredImage[]) => {
                     const submittedTasks: ImageTask[] = [];
                     const failures: Array<{ taskId: string; message: string }> = [];
+                    const resolutionFallbacks: Array<{
+                        taskId: string;
+                        currentResolution: ImageResolution;
+                        nextResolution: ImageResolution;
+                    }> = [];
                     await forEachWithConcurrency(
                         images,
                         SUBMIT_IMAGE_TASK_CONCURRENCY,
                         async (image) => {
                             const taskId = image.taskId || image.id;
+                            const resolution = normalizeImageResolution(image.resolution || activeTurn.resolution);
                             try {
                                 const task = activeTurn.mode === "edit"
-                                    ? await createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
-                                    : await createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size);
+                                    ? await createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, resolution)
+                                    : await createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, resolution);
                                 submittedTasks.push(task);
                             } catch (error) {
+                                const message = error instanceof Error ? error.message : "创建图片任务失败";
+                                const nextResolution = isResolutionFallbackError(message) ? nextLowerImageResolution(resolution) : null;
+                                if (nextResolution) {
+                                    resolutionFallbacks.push({taskId, currentResolution: resolution, nextResolution});
+                                    return;
+                                }
                                 failures.push({
                                     taskId,
-                                    message: error instanceof Error ? error.message : "创建图片任务失败",
+                                    message,
                                 });
                             }
                         },
@@ -997,6 +1153,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                     if (submittedTasks.length > 0) {
                         await applyTasks(submittedTasks);
                     }
+                    await applyResolutionFallbacks(resolutionFallbacks);
                     await markSubmitFailures(failures);
                     if (failures.length > 0) {
                         const uniqueMessages = Array.from(new Set(failures.map((item) => item.message)));
@@ -1093,7 +1250,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                 referenceImages: sourceTurn.referenceImages,
                 count,
                 size: sourceTurn.size,
-                images: createLoadingImages(nextTurnId, count),
+                resolution: normalizeImageResolution(sourceTurn.resolution),
+                images: createLoadingImages(nextTurnId, count, normalizeImageResolution(sourceTurn.resolution)),
                 createdAt: now,
                 status: "queued",
             };
@@ -1136,6 +1294,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                             ? {
                                 id: retryImageId,
                                 taskId: retryImageId,
+                                resolution: normalizeImageResolution(turn.resolution),
                                 status: "loading" as const,
                             }
                             : image,
@@ -1195,7 +1354,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             referenceImages: effectiveImageMode === "edit" ? referenceImages : [],
             count: parsedCount,
             size: imageSize,
-            images: createLoadingImages(turnId, parsedCount),
+            resolution: imageResolution,
+            images: createLoadingImages(turnId, parsedCount, imageResolution),
             createdAt: now,
             status: "queued",
         };
@@ -1328,6 +1488,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                         prompt={imagePrompt}
                         imageCount={imageCount}
                         imageSize={imageSize}
+                        imageResolution={imageResolution}
                         availableQuota={availableQuota}
                         activeTaskCount={activeTaskCount}
                         maxImageCount={maxImageCount}
@@ -1337,6 +1498,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                         onPromptChange={setImagePrompt}
                         onImageCountChange={(value) => setImageCount(value ? clampImageCount(value, maxImageCount) : "")}
                         onImageSizeChange={setImageSize}
+                        onImageResolutionChange={setImageResolution}
                         onSubmit={handleSubmit}
                         onPickReferenceImage={() => fileInputRef.current?.click()}
                         onReferenceImageChange={handleReferenceImageChange}

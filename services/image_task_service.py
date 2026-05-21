@@ -125,6 +125,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "mode": task.get("mode"),
         "model": task.get("model"),
         "size": task.get("size"),
+        "resolution": task.get("resolution"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
     }
@@ -179,12 +180,14 @@ class ImageTaskService:
         model: str,
         size: str | None,
         base_url: str,
+        resolution: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
             "model": model,
             "n": 1,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
         }
@@ -200,6 +203,7 @@ class ImageTaskService:
         size: str | None,
         base_url: str,
         images: list[tuple[bytes, str, str]],
+        resolution: str | None = None,
         count: object = 1,
         quota_reservation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -209,6 +213,7 @@ class ImageTaskService:
             "model": model,
             "n": count,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
         }
@@ -222,6 +227,7 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        resolution: str | None = None,
         count: object = 1,
     ) -> dict[str, Any]:
         payload = {
@@ -229,6 +235,7 @@ class ImageTaskService:
             "model": model,
             "n": count,
             "size": size,
+            "resolution": resolution,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload, start=False, mark_created=True)
 
@@ -242,6 +249,7 @@ class ImageTaskService:
         size: str | None,
         base_url: str,
         images: list[tuple[bytes, str, str]],
+        resolution: str | None = None,
         count: object = 1,
     ) -> dict[str, Any]:
         task_id = _clean(client_task_id)
@@ -255,6 +263,7 @@ class ImageTaskService:
             "model": model,
             "n": count,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
         }
@@ -369,6 +378,7 @@ class ImageTaskService:
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
+                "resolution": _clean(payload.get("resolution")),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -634,6 +644,7 @@ class ImageTaskService:
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
+                "resolution": _clean(item.get("resolution")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }

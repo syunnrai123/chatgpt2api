@@ -2,7 +2,7 @@
 
 import localforage from "localforage";
 
-import type { ImageModel } from "@/lib/api";
+import type { ImageModel, ImageResolution } from "@/lib/api";
 
 export type ImageConversationMode = "generate" | "edit";
 
@@ -15,6 +15,7 @@ export type StoredReferenceImage = {
 export type StoredImage = {
   id: string;
   taskId?: string;
+  resolution?: ImageResolution;
   status?: "loading" | "success" | "error";
   b64_json?: string;
   url?: string;
@@ -32,6 +33,7 @@ export type ImageTurn = {
   referenceImages: StoredReferenceImage[];
   count: number;
   size: string;
+  resolution: ImageResolution;
   images: StoredImage[];
   createdAt: string;
   status: ImageTurnStatus;
@@ -61,10 +63,16 @@ const imageConversationStorage = localforage.createInstance({
 const IMAGE_CONVERSATIONS_KEY = "items";
 let imageConversationWriteQueue: Promise<void> = Promise.resolve();
 
+function normalizeImageResolution(value: unknown): ImageResolution {
+  const text = String(value || "").trim().toLowerCase();
+  return text === "2k" || text === "4k" ? text : "1k";
+}
+
 function normalizeStoredImage(image: StoredImage): StoredImage {
   const normalized = {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
+    resolution: normalizeImageResolution(image.resolution),
     url: typeof image.url === "string" && image.url ? image.url : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
   };
@@ -136,6 +144,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     referenceImages: getLegacyReferenceImages(turn),
     count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
+    resolution: normalizeImageResolution(turn.resolution),
     images: normalizedImages,
     createdAt: String(turn.createdAt || new Date().toISOString()),
     status:
@@ -163,6 +172,7 @@ function normalizeConversation(conversation: ImageConversation & Record<string, 
           referenceImages: getLegacyReferenceImages(conversation),
           count: Number(conversation.count || 1),
           size: typeof conversation.size === "string" ? conversation.size : "",
+          resolution: normalizeImageResolution(conversation.resolution),
           images: Array.isArray(conversation.images) ? (conversation.images as StoredImage[]) : [],
           createdAt: String(conversation.createdAt || new Date().toISOString()),
           status:

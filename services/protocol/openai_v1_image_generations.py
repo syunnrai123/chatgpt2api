@@ -16,6 +16,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     model = normalize_image_model(body.get("model"))
     n = int(body.get("n") or 1)
     size = body.get("size")
+    resolution = body.get("resolution")
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     outputs = stream_image_outputs_with_pool(ConversationRequest(
@@ -23,6 +24,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         model=model,
         n=n,
         size=size,
+        resolution=resolution,
         response_format=response_format,
         base_url=base_url,
         message_as_error=True,

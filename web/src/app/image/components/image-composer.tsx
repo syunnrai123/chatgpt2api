@@ -6,12 +6,14 @@ import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import type { ImageResolution } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
   prompt: string;
   imageCount: string;
   imageSize: string;
+  imageResolution: ImageResolution;
   availableQuota: string;
   activeTaskCount: number;
   maxImageCount: number;
@@ -21,6 +23,7 @@ type ImageComposerProps = {
   onPromptChange: (value: string) => void;
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
+  onImageResolutionChange: (value: ImageResolution) => void;
   onSubmit: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
@@ -31,6 +34,7 @@ export function ImageComposer({
   prompt,
   imageCount,
   imageSize,
+  imageResolution,
   availableQuota,
   activeTaskCount,
   maxImageCount,
@@ -40,6 +44,7 @@ export function ImageComposer({
   onPromptChange,
   onImageCountChange,
   onImageSizeChange,
+  onImageResolutionChange,
   onSubmit,
   onPickReferenceImage,
   onReferenceImageChange,
@@ -62,6 +67,11 @@ export function ImageComposer({
     { value: "4:3", label: "4:3 (横版)" },
     { value: "3:4", label: "3:4 (竖版)" },
     { value: "9:16", label: "9:16 (竖版)" },
+  ];
+  const imageResolutionOptions: Array<{ value: ImageResolution; label: string }> = [
+    { value: "1k", label: "1K" },
+    { value: "2k", label: "2K" },
+    { value: "4k", label: "4K" },
   ];
   const imageSizeLabel = imageSizeOptions.find((option) => option.value === imageSize)?.label || "未指定";
 
@@ -260,6 +270,22 @@ export function ImageComposer({
                         })}
                       </div>
                     ) : null}
+                  </div>
+                  <div className="relative flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[11px] sm:h-auto sm:gap-2 sm:px-3 sm:py-1 sm:text-[13px]">
+                    <span className="hidden font-medium text-stone-700 sm:inline sm:text-sm">清晰度偏好</span>
+                    <select
+                      value={imageResolution}
+                      onChange={(event) => onImageResolutionChange(event.target.value as ImageResolution)}
+                      className="h-7 w-[58px] appearance-none bg-transparent pr-5 text-xs font-bold text-stone-700 outline-none sm:h-8 sm:w-[72px] sm:text-sm"
+                      aria-label="选择生成图像清晰度偏好"
+                    >
+                      {imageResolutionOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-2 size-4 text-stone-400 sm:right-3" />
                   </div>
 
                 </div>

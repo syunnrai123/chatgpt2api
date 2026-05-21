@@ -59,6 +59,7 @@ class ImageEditsJsonApiTests(unittest.TestCase):
                 "prompt": "把图片改成夜景风格",
                 "n": 1,
                 "size": "1024x1536",
+                "resolution": "2k",
                 "response_format": "b64_json",
                 "images": [{"image_url": PNG_DATA_URL}],
             },
@@ -67,6 +68,7 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         payload = self.calls[0]
         self.assertEqual(payload["images"], [(b"fake-png", "image_1.png", "image/png")])
         self.assertEqual(payload["size"], "1024x1536")
+        self.assertEqual(payload["resolution"], "2k")
 
     def test_image_edit_accepts_json_multiple_images_and_b64_json(self):
         response = self.client.post(
