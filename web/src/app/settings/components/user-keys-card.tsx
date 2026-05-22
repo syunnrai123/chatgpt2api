@@ -51,6 +51,10 @@ function formatQuota(value?: number | null) {
     return new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 6}).format(amount);
 }
 
+function normalizeAllowedIps(value: string) {
+    return Array.from(new Set(value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)));
+}
+
 function buildUserKeyDemoCurl(baseUrl: string, apiKey: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "") || "https://your-domain.example/v1";
     const endpoint = `${normalizedBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/generations`;
@@ -62,7 +66,7 @@ function buildUserKeyDemoCurl(baseUrl: string, apiKey: string) {
     "model": "gpt-image-2",
     "prompt": "一只橘猫坐在电脑前测试接口，可爱插画风格",
     "n": 1,
-    "response_format": "url"
+    "response_format": "b64_json"
   }'`;
 }
 
@@ -73,6 +77,7 @@ export function UserKeysCard() {
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [name, setName] = useState("");
     const [imageQuota, setImageQuota] = useState("0");
+    const [allowedIps, setAllowedIps] = useState("");
     const [isCreating, setIsCreating] = useState(false);
     const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
     const [revealedKey, setRevealedKey] = useState("");
@@ -81,9 +86,12 @@ export function UserKeysCard() {
     const [rechargingItem, setRechargingItem] = useState<UserKey | null>(null);
     const [editName, setEditName] = useState("");
     const [editKey, setEditKey] = useState("");
+    const [editAllowedIps, setEditAllowedIps] = useState("");
     const [rechargeAmount, setRechargeAmount] = useState("");
     const [isRecharging, setIsRecharging] = useState(false);
-    const [demoBaseUrl, setDemoBaseUrl] = useState("https://your-domain.example/v1");
+    const [demoBaseUrl] = useState(() =>
+        typeof window !== "undefined" ? `${window.location.origin}/v1` : "https://your-domain.example/v1",
+    );
 
     const load = async () => {
         setIsLoading(true);
@@ -102,9 +110,6 @@ export function UserKeysCard() {
             return;
         }
         didLoadRef.current = true;
-        if (typeof window !== "undefined") {
-            setDemoBaseUrl(`${window.location.origin}/v1`);
-        }
         void load();
     }, []);
 
@@ -112,11 +117,12 @@ export function UserKeysCard() {
         const quota = Math.max(0, Number(imageQuota) || 0);
         setIsCreating(true);
         try {
-            const data = await createUserKey(name.trim(), quota);
+            const data = await createUserKey(name.trim(), quota, normalizeAllowedIps(allowedIps));
             setItems(data.items);
             setRevealedKey(data.key);
             setName("");
             setImageQuota("0");
+            setAllowedIps("");
             setIsDialogOpen(false);
             toast.success("用户密钥已创建");
         } catch (error) {
@@ -173,6 +179,7 @@ export function UserKeysCard() {
         setEditingItem(item);
         setEditName(item.name);
         setEditKey("");
+        setEditAllowedIps((item.allowed_ips || []).join("\n"));
     };
 
     const openRechargeDialog = (item: UserKey) => {
@@ -213,7 +220,10 @@ export function UserKeysCard() {
         const item = editingItem;
         const trimmedName = editName.trim();
         const trimmedKey = editKey.trim();
-        if (trimmedName === item.name && !trimmedKey) {
+        const nextAllowedIps = normalizeAllowedIps(editAllowedIps);
+        const currentAllowedIps = item.allowed_ips || [];
+        const allowedIpsChanged = nextAllowedIps.join("\n") !== currentAllowedIps.join("\n");
+        if (trimmedName === item.name && !trimmedKey && !allowedIpsChanged) {
             setEditingItem(null);
             return;
         }
@@ -222,6 +232,7 @@ export function UserKeysCard() {
             const data = await updateUserKey(item.id, {
                 ...(trimmedName !== item.name ? {name: trimmedName} : {}),
                 ...(trimmedKey ? {key: trimmedKey} : {}),
+                ...(allowedIpsChanged ? {allowed_ips: nextAllowedIps} : {}),
             });
             setItems(data.items);
             setEditingItem(null);
@@ -340,6 +351,9 @@ export function UserKeysCard() {
                                                 <span>创建时间 {formatDateTime(item.created_at)}</span>
                                                 <span>最近使用 {formatDateTime(item.last_used_at)}</span>
                                             </div>
+                                            <div className="break-all text-xs leading-5 text-stone-500">
+                                                绑定 IP：{item.allowed_ips?.length ? item.allowed_ips.join("、") : "不限"}
+                                            </div>
                                         </div>
 
                                         <div className="flex items-center gap-2">
@@ -401,7 +415,15 @@ export function UserKeysCard() {
                 </CardContent>
             </Card>
 
-            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <Dialog
+                open={isDialogOpen}
+                onOpenChange={(open) => {
+                    setIsDialogOpen(open);
+                    if (!open) {
+                        setAllowedIps("");
+                    }
+                }}
+            >
                 <DialogContent className="rounded-2xl p-6">
                     <DialogHeader className="gap-2">
                         <DialogTitle>创建用户密钥</DialogTitle>
@@ -430,12 +452,27 @@ export function UserKeysCard() {
                             className="h-11 rounded-xl border-stone-200 bg-white"
                         />
                     </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-stone-700">绑定 IP（可选）</label>
+                        <Textarea
+                            value={allowedIps}
+                            onChange={(event) => setAllowedIps(event.target.value)}
+                            placeholder={"每行一个 IP 或 CIDR，例如：\n203.0.113.10\n203.0.113.0/24"}
+                            className="min-h-28 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
+                        />
+                        <p className="text-xs leading-5 text-stone-500">
+                            留空表示不限制来源 IP；填写后该用户密钥只能从匹配的 IP 调用接口。
+                        </p>
+                    </div>
                     <DialogFooter>
                         <Button
                             type="button"
                             variant="secondary"
                             className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-                            onClick={() => setIsDialogOpen(false)}
+                            onClick={() => {
+                                setIsDialogOpen(false);
+                                setAllowedIps("");
+                            }}
                             disabled={isCreating}
                         >
                             取消
@@ -491,6 +528,7 @@ export function UserKeysCard() {
                     if (!open) {
                         setEditingItem(null);
                         setEditKey("");
+                        setEditAllowedIps("");
                     }
                 }}
             >
@@ -523,6 +561,18 @@ export function UserKeysCard() {
                                 保存后旧密钥会立即失效，新密钥生效。系统仍只保存哈希，不会回显当前密钥。
                             </p>
                         </div>
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-stone-700">绑定 IP（可选）</label>
+                            <Textarea
+                                value={editAllowedIps}
+                                onChange={(event) => setEditAllowedIps(event.target.value)}
+                                placeholder={"每行一个 IP 或 CIDR，例如：\n203.0.113.10\n203.0.113.0/24"}
+                                className="min-h-28 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
+                            />
+                            <p className="text-xs leading-5 text-stone-500">
+                                清空后不限制来源 IP；支持 IPv4、IPv6 和 CIDR 网段。
+                            </p>
+                        </div>
                     </div>
                     <DialogFooter>
                         <Button
@@ -532,6 +582,7 @@ export function UserKeysCard() {
                             onClick={() => {
                                 setEditingItem(null);
                                 setEditKey("");
+                                setEditAllowedIps("");
                             }}
                             disabled={editingItem ? pendingIds.has(editingItem.id) : false}
                         >

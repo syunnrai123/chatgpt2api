@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, Repeat, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -28,6 +28,8 @@ type ImageComposerProps = {
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
   onRemoveReferenceImage: (index: number) => void;
+  continuousReference: boolean;
+  onContinuousReferenceChange: (value: boolean) => void;
 };
 
 export function ImageComposer({
@@ -49,6 +51,8 @@ export function ImageComposer({
   onPickReferenceImage,
   onReferenceImageChange,
   onRemoveReferenceImage,
+  continuousReference,
+  onContinuousReferenceChange,
 }: ImageComposerProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -195,6 +199,20 @@ export function ImageComposer({
                     <ImagePlus className="size-3.5 sm:size-4" />
                     <span className="hidden sm:inline">{referenceImages.length > 0 ? "添加参考图" : "上传"}</span>
                   </Button>
+                  <button
+                    type="button"
+                    className={cn(
+                      "flex h-9 shrink-0 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition sm:h-10 sm:gap-1.5 sm:px-3 sm:text-[13px]",
+                      continuousReference
+                        ? "border-blue-200 bg-blue-50 text-blue-700"
+                        : "border-stone-200 bg-white text-stone-400"
+                    )}
+                    onClick={() => onContinuousReferenceChange(!continuousReference)}
+                    aria-label="连续参考"
+                  >
+                    <Repeat className="size-3.5 sm:size-4" />
+                    <span className="hidden sm:inline">连续参考</span>
+                  </button>
                   <div className="shrink-0 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
                     <span className="hidden sm:inline">剩余额度 </span>{availableQuota}
                   </div>
@@ -307,4 +325,3 @@ export function ImageComposer({
     </div>
   );
 }
-

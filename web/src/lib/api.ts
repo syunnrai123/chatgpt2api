@@ -87,7 +87,13 @@ export type SettingsConfig = {
         prompt?: string;
     };
     refresh_account_interval_minute?: number | string;
+    image_save_enabled?: boolean;
+    image_retention_minutes?: number | string;
     image_retention_days?: number | string;
+    trust_proxy_headers?: boolean;
+    trusted_proxy_ips?: string[];
+    max_volatile_image_results?: number | string;
+    max_volatile_image_bytes?: number | string;
     image_poll_timeout_secs?: number | string;
     image_account_concurrency?: number | string;
     image_quota?: {
@@ -221,6 +227,7 @@ export type ImageTask = {
     created_at: string;
     updated_at: string;
     data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+    data_expired?: boolean;
     error?: string;
 };
 
@@ -248,6 +255,7 @@ export type UserKey = {
     name: string;
     role: "user";
     enabled: boolean;
+    allowed_ips: string[];
     image_quota: number;
     image_quota_reserved: number;
     image_quota_available: number;
@@ -637,14 +645,17 @@ export async function fetchUserKeys() {
     return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string, imageQuota = 0) {
+export async function createUserKey(name: string, imageQuota = 0, allowedIps: string[] = []) {
     return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
         method: "POST",
-        body: {name, image_quota: imageQuota},
+        body: {name, image_quota: imageQuota, allowed_ips: allowedIps},
     });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
+export async function updateUserKey(
+    keyId: string,
+    updates: { enabled?: boolean; name?: string; key?: string; allowed_ips?: string[] },
+) {
     return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
         method: "POST",
         body: updates,

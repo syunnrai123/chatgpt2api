@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 import time
@@ -37,6 +39,12 @@ DEFAULT_IMAGE_STORAGE = {
     "webdav_root_path": "chatgpt2api/images",
     "public_base_url": "",
 }
+DEFAULT_IMAGE_SAVE_ENABLED = False
+DEFAULT_IMAGE_RETENTION_MINUTES = 30 * 24 * 60
+DEFAULT_TRUST_PROXY_HEADERS = False
+DEFAULT_TRUSTED_PROXY_IPS: list[str] = []
+DEFAULT_MAX_VOLATILE_IMAGE_RESULTS = 64
+DEFAULT_MAX_VOLATILE_IMAGE_BYTES = 256 * 1024 * 1024
 
 DEFAULT_IMAGE_QUOTA = {
     "generation_multiplier": 1.0,
@@ -79,6 +87,42 @@ def _normalize_positive_float(value: object, default: float, minimum: float = 0.
     except (TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _split_string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [item.strip() for item in re.split(r"[\s,]+", value) if item.strip()]
+    if isinstance(value, list):
+        return [str(item or "").strip() for item in value if str(item or "").strip()]
+    return []
+
+
+def _normalize_ip_rules(value: object, *, raise_on_invalid: bool = False) -> list[str]:
+    rules: list[str] = []
+    seen: set[str] = set()
+    for raw in _split_string_list(value):
+        try:
+            normalized = str(ipaddress.ip_network(raw, strict=False)) if "/" in raw else str(ipaddress.ip_address(raw))
+        except ValueError:
+            if raise_on_invalid:
+                raise ValueError(f"IP 规则无效：{raw}") from None
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        rules.append(normalized)
+    return rules
+
+
+def _validate_proxy_header_settings(data: dict[str, object]) -> None:
+    if not _normalize_bool(data.get("trust_proxy_headers"), DEFAULT_TRUST_PROXY_HEADERS):
+        return
+    trusted_proxy_ips = _normalize_ip_rules(
+        data.get("trusted_proxy_ips", DEFAULT_TRUSTED_PROXY_IPS),
+        raise_on_invalid=True,
+    )
+    if not trusted_proxy_ips:
+        raise ValueError("开启反向代理 IP 头信任时必须填写可信反代 IP 或 CIDR")
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -266,10 +310,50 @@ class ConfigStore:
 
     @property
     def image_retention_days(self) -> int:
+        return max(1, int((self.image_retention_minutes + 1439) // 1440))
+
+    @property
+    def image_retention_minutes(self) -> int:
         try:
-            return max(1, int(self.data.get("image_retention_days", 30)))
+            if self.data.get("image_retention_minutes") is not None:
+                return max(1, int(self.data.get("image_retention_minutes", DEFAULT_IMAGE_RETENTION_MINUTES)))
+            return max(1, int(self.data.get("image_retention_days", 30)) * 1440)
         except (TypeError, ValueError):
-            return 30
+            return DEFAULT_IMAGE_RETENTION_MINUTES
+
+    @property
+    def image_save_enabled(self) -> bool:
+        return _normalize_bool(self.data.get("image_save_enabled"), DEFAULT_IMAGE_SAVE_ENABLED)
+
+    @property
+    def trust_proxy_headers(self) -> bool:
+        return _normalize_bool(self.data.get("trust_proxy_headers"), DEFAULT_TRUST_PROXY_HEADERS)
+
+    @property
+    def trusted_proxy_ips(self) -> list[str]:
+        try:
+            return _normalize_ip_rules(
+                self.data.get("trusted_proxy_ips", DEFAULT_TRUSTED_PROXY_IPS),
+                raise_on_invalid=True,
+            )
+        except ValueError:
+            return []
+
+    @property
+    def max_volatile_image_results(self) -> int:
+        return _normalize_positive_int(
+            self.data.get("max_volatile_image_results"),
+            DEFAULT_MAX_VOLATILE_IMAGE_RESULTS,
+            1,
+        )
+
+    @property
+    def max_volatile_image_bytes(self) -> int:
+        return _normalize_positive_int(
+            self.data.get("max_volatile_image_bytes"),
+            DEFAULT_MAX_VOLATILE_IMAGE_BYTES,
+            1,
+        )
 
     @property
     def image_poll_timeout_secs(self) -> int:
@@ -351,7 +435,7 @@ class ConfigStore:
         return path
 
     def cleanup_old_images(self) -> int:
-        cutoff = time.time() - self.image_retention_days * 86400
+        cutoff = time.time() - self.image_retention_minutes * 60
         removed = 0
         for path in self.images_dir.rglob("*"):
             if path.is_file() and path.stat().st_mtime < cutoff:
@@ -383,7 +467,13 @@ class ConfigStore:
     def get(self) -> dict[str, object]:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
+        data["image_save_enabled"] = self.image_save_enabled
+        data["image_retention_minutes"] = self.image_retention_minutes
         data["image_retention_days"] = self.image_retention_days
+        data["trust_proxy_headers"] = self.trust_proxy_headers
+        data["trusted_proxy_ips"] = self.trusted_proxy_ips
+        data["max_volatile_image_results"] = self.max_volatile_image_results
+        data["max_volatile_image_bytes"] = self.max_volatile_image_bytes
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -405,8 +495,43 @@ class ConfigStore:
         return str(self.data.get("proxy") or "").strip()
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
+        incoming = dict(data or {})
         next_data = dict(self.data)
-        next_data.update(dict(data or {}))
+        next_data.update(incoming)
+        if "image_save_enabled" in next_data:
+            next_data["image_save_enabled"] = _normalize_bool(next_data.get("image_save_enabled"), DEFAULT_IMAGE_SAVE_ENABLED)
+        if "image_retention_minutes" in incoming or "image_retention_minutes" in next_data:
+            next_data["image_retention_minutes"] = _normalize_positive_int(
+                next_data.get("image_retention_minutes"),
+                DEFAULT_IMAGE_RETENTION_MINUTES,
+                1,
+            )
+        if "image_retention_days" in incoming and "image_retention_minutes" not in incoming:
+            next_data["image_retention_minutes"] = _normalize_positive_int(next_data.get("image_retention_days"), 30, 1) * 1440
+        elif "image_retention_minutes" not in next_data and "image_retention_days" in next_data:
+            next_data["image_retention_minutes"] = _normalize_positive_int(next_data.get("image_retention_days"), 30, 1) * 1440
+        proxy_settings_touched = "trust_proxy_headers" in incoming or "trusted_proxy_ips" in incoming
+        if "trust_proxy_headers" in incoming:
+            next_data["trust_proxy_headers"] = _normalize_bool(
+                next_data.get("trust_proxy_headers"),
+                DEFAULT_TRUST_PROXY_HEADERS,
+            )
+        if "trusted_proxy_ips" in incoming:
+            next_data["trusted_proxy_ips"] = _normalize_ip_rules(next_data.get("trusted_proxy_ips"), raise_on_invalid=True)
+        if proxy_settings_touched:
+            _validate_proxy_header_settings(next_data)
+        if "max_volatile_image_results" in next_data:
+            next_data["max_volatile_image_results"] = _normalize_positive_int(
+                next_data.get("max_volatile_image_results"),
+                DEFAULT_MAX_VOLATILE_IMAGE_RESULTS,
+                1,
+            )
+        if "max_volatile_image_bytes" in next_data:
+            next_data["max_volatile_image_bytes"] = _normalize_positive_int(
+                next_data.get("max_volatile_image_bytes"),
+                DEFAULT_MAX_VOLATILE_IMAGE_BYTES,
+                1,
+            )
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

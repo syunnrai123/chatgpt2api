@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from functools import lru_cache
 from threading import Lock
 from typing import Any, Literal
 
@@ -42,6 +45,64 @@ def _quota_number(value: Decimal | object) -> float:
 
 def _reservation_id(value: object) -> str:
     return str(value or "").strip()
+
+
+def _split_ip_rules(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [item.strip() for item in re.split(r"[\s,]+", value) if item.strip()]
+    if isinstance(value, list):
+        return [str(item or "").strip() for item in value if str(item or "").strip()]
+    return []
+
+
+def _normalize_ip_rules(value: object, *, raise_on_invalid: bool = False) -> list[str]:
+    rules: list[str] = []
+    seen: set[str] = set()
+    for raw in _split_ip_rules(value):
+        try:
+            normalized = str(ipaddress.ip_network(raw, strict=False)) if "/" in raw else str(ipaddress.ip_address(raw))
+        except ValueError:
+            if raise_on_invalid:
+                raise ValueError(f"IP 规则无效：{raw}") from None
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        rules.append(normalized)
+    return rules
+
+
+@lru_cache(maxsize=2048)
+def _compiled_ip_rules(rules: tuple[str, ...]) -> tuple[tuple[object, ...], tuple[object, ...]]:
+    addresses: list[object] = []
+    networks: list[object] = []
+    for rule in rules:
+        if "/" in rule:
+            networks.append(ipaddress.ip_network(rule, strict=False))
+        else:
+            addresses.append(ipaddress.ip_address(rule))
+    return tuple(addresses), tuple(networks)
+
+
+def _ip_rule_cache_key(rules: object) -> tuple[str, ...]:
+    if isinstance(rules, list):
+        return tuple(str(rule or "").strip() for rule in rules if str(rule or "").strip())
+    return tuple(_normalize_ip_rules(rules))
+
+
+def _ip_matches_rules(client_ip: object, rules: object) -> bool:
+    rule_key = _ip_rule_cache_key(rules)
+    if not rule_key:
+        return True
+    try:
+        ip = ipaddress.ip_address(str(client_ip or "").strip())
+    except ValueError:
+        return False
+    try:
+        addresses, networks = _compiled_ip_rules(rule_key)
+    except ValueError:
+        return False
+    return any(ip == address for address in addresses) or any(ip in network for network in networks)
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:
@@ -105,6 +166,7 @@ class AuthService:
             "role": role,
             "key_hash": key_hash,
             "enabled": bool(raw.get("enabled", True)),
+            "allowed_ips": _normalize_ip_rules(raw.get("allowed_ips")),
             "image_quota": _quota_number(image_quota),
             "image_quota_reserved": _quota_number(image_quota_reserved),
             "image_quota_reservations": image_quota_reservations,
@@ -202,6 +264,7 @@ class AuthService:
             "name": item.get("name"),
             "role": item.get("role"),
             "enabled": bool(item.get("enabled", True)),
+            "allowed_ips": _normalize_ip_rules(item.get("allowed_ips")),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
         }
@@ -274,10 +337,18 @@ class AuthService:
             raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
         return candidate
 
-    def create_key(self, *, role: AuthRole, name: str = "", image_quota: object = 0) -> tuple[dict[str, object], str]:
+    def create_key(
+        self,
+        *,
+        role: AuthRole,
+        name: str = "",
+        image_quota: object = 0,
+        allowed_ips: object = None,
+    ) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
+            normalized_allowed_ips = _normalize_ip_rules(allowed_ips, raise_on_invalid=True)
             while True:
                 raw_key = f"sk-{secrets.token_urlsafe(24)}"
                 try:
@@ -291,6 +362,7 @@ class AuthService:
                 "role": role,
                 "key_hash": key_hash,
                 "enabled": True,
+                "allowed_ips": normalized_allowed_ips,
                 "image_quota": _quota_number(_quota_decimal(image_quota)) if role == "user" else 0,
                 "image_quota_reserved": 0,
                 "image_quota_reservations": {},
@@ -330,6 +402,8 @@ class AuthService:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
+                if "allowed_ips" in updates and updates.get("allowed_ips") is not None:
+                    next_item["allowed_ips"] = _normalize_ip_rules(updates.get("allowed_ips"), raise_on_invalid=True)
                 if "image_quota" in updates and updates.get("image_quota") is not None:
                     next_quota = _quota_decimal(updates.get("image_quota"))
                     reservations = self._active_reservations(next_item)
@@ -429,13 +503,29 @@ class AuthService:
                 return reservation
         raise ImageQuotaError("密钥无效或已失效，请重新登录")
 
-    def confirm_image_quota(self, reservation: dict[str, Any] | None) -> dict[str, object] | None:
-        return self._finish_image_quota_reservation(reservation, charge=True)
+    def confirm_image_quota(
+        self,
+        reservation: dict[str, Any] | None,
+        *,
+        strict: bool = False,
+    ) -> dict[str, object] | None:
+        return self._finish_image_quota_reservation(reservation, charge=True, strict=strict)
 
-    def refund_image_quota(self, reservation: dict[str, Any] | None) -> dict[str, object] | None:
-        return self._finish_image_quota_reservation(reservation, charge=False)
+    def refund_image_quota(
+        self,
+        reservation: dict[str, Any] | None,
+        *,
+        strict: bool = False,
+    ) -> dict[str, object] | None:
+        return self._finish_image_quota_reservation(reservation, charge=False, strict=strict)
 
-    def _finish_image_quota_reservation(self, reservation: dict[str, Any] | None, *, charge: bool) -> dict[str, object] | None:
+    def _finish_image_quota_reservation(
+        self,
+        reservation: dict[str, Any] | None,
+        *,
+        charge: bool,
+        strict: bool,
+    ) -> dict[str, object] | None:
         if not reservation:
             return None
         key_id = self._clean(reservation.get("key_id"))
@@ -450,6 +540,8 @@ class AuthService:
                 reservations = self._active_reservations(item)
                 active = reservations.pop(normalized_reservation_id, None)
                 if active is None:
+                    if strict:
+                        raise ImageQuotaError("图片额度预占记录不存在或已完成")
                     return self._public_item(item)
                 cost = _quota_decimal(active.get("cost"))
                 if cost <= 0:
@@ -489,7 +581,7 @@ class AuthService:
             self._save()
             return True
 
-    def authenticate(self, raw_key: str) -> dict[str, object] | None:
+    def authenticate(self, raw_key: str, client_ip: str | None = None) -> dict[str, object] | None:
         candidate = self._clean(raw_key)
         if not candidate:
             return None
@@ -501,6 +593,8 @@ class AuthService:
                 stored_hash = self._clean(item.get("key_hash"))
                 if not stored_hash or not hmac.compare_digest(stored_hash, candidate_hash):
                     continue
+                if not _ip_matches_rules(client_ip, item.get("allowed_ips")):
+                    return None
                 next_item = dict(item)
                 now = datetime.now(timezone.utc)
                 next_item["last_used_at"] = now.isoformat()

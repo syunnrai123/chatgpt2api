@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
+import ipaddress
 from pathlib import Path
 from threading import Event, Thread
 
@@ -11,6 +13,7 @@ from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+_CURRENT_REQUEST: ContextVar[Request | None] = ContextVar("chatgpt2api_current_request", default=None)
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -27,9 +30,87 @@ def _legacy_admin_identity(token: str) -> dict[str, object] | None:
     return None
 
 
+def bind_request_context(request: Request) -> Token[Request | None]:
+    return _CURRENT_REQUEST.set(request)
+
+
+def reset_request_context(token: Token[Request | None]) -> None:
+    _CURRENT_REQUEST.reset(token)
+
+
+def _clean_client_ip(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("[") and "]" in text:
+        return text[1:text.index("]")].strip()
+    if text.count(":") == 1:
+        host, _, port = text.partition(":")
+        if host and port.isdigit():
+            return host.strip()
+    return text
+
+
+def _valid_ip(value: object) -> str:
+    text = _clean_client_ip(value)
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return ""
+
+
+def _ip_matches_rules(client_ip: object, rules: object) -> bool:
+    if not isinstance(rules, list) or not rules:
+        return False
+    try:
+        ip = ipaddress.ip_address(_clean_client_ip(client_ip))
+    except ValueError:
+        return False
+    for rule in rules:
+        try:
+            raw_rule = str(rule or "").strip()
+            if "/" in raw_rule:
+                if ip in ipaddress.ip_network(raw_rule, strict=False):
+                    return True
+            elif ip == ipaddress.ip_address(raw_rule):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _forwarded_chain_client_ip(forwarded_ips: list[str], peer_ip: str, trusted_proxy_ips: list[str]) -> str:
+    chain = [*forwarded_ips, peer_ip]
+    for candidate in reversed(chain):
+        if not _ip_matches_rules(candidate, trusted_proxy_ips):
+            return candidate
+    return ""
+
+
+def request_client_ip(request: Request | None = None) -> str:
+    active_request = request or _CURRENT_REQUEST.get()
+    if active_request is None:
+        return ""
+    peer_ip = _valid_ip(active_request.client.host if active_request.client else "")
+    trusted_proxy_ips = config.trusted_proxy_ips
+    if not config.trust_proxy_headers or not trusted_proxy_ips or not _ip_matches_rules(peer_ip, trusted_proxy_ips):
+        return peer_ip
+    forwarded_ips = [_valid_ip(candidate) for candidate in str(active_request.headers.get("x-forwarded-for", "") or "").split(",")]
+    forwarded_ips = [client_ip for client_ip in forwarded_ips if client_ip]
+    client_ip = _forwarded_chain_client_ip(forwarded_ips, peer_ip, trusted_proxy_ips)
+    if client_ip:
+        return client_ip
+    real_ip = _valid_ip(active_request.headers.get("x-real-ip", ""))
+    if real_ip and not _ip_matches_rules(real_ip, trusted_proxy_ips):
+        return real_ip
+    return peer_ip
+
+
 def require_identity(authorization: str | None) -> dict[str, object]:
     token = extract_bearer_token(authorization)
-    identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
+    identity = _legacy_admin_identity(token) or auth_service.authenticate(token, client_ip=request_client_ip())
     if identity is None:
         raise HTTPException(status_code=401, detail={"error": "密钥无效或已失效，请重新登录"})
     return identity

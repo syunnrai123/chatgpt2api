@@ -37,6 +37,10 @@ class ImageTaskServiceTests(unittest.TestCase):
         self,
         path: Path,
         handler=None,
+        retention_minutes_getter=None,
+        volatile_result_ttl_secs_getter=None,
+        max_volatile_results_getter=None,
+        max_volatile_bytes_getter=None,
         task_workers: int | None = None,
         task_queue_size: int | None = None,
     ) -> ImageTaskService:
@@ -44,7 +48,11 @@ class ImageTaskServiceTests(unittest.TestCase):
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
+            retention_minutes_getter=retention_minutes_getter,
             retention_days_getter=lambda: 30,
+            volatile_result_ttl_secs_getter=volatile_result_ttl_secs_getter,
+            max_volatile_results_getter=max_volatile_results_getter,
+            max_volatile_bytes_getter=max_volatile_bytes_getter,
             task_workers=task_workers,
             task_queue_size=task_queue_size,
         )
@@ -99,7 +107,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             result = image_quota_module.run_image_handler_with_quota(handler, {}, reservation)
             self.assertEqual(list(result), [{"data": [{"url": "http://example.test/image.png"}]}])
 
-        auth.confirm_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
         auth.refund_image_quota.assert_not_called()
 
     def test_stream_quota_confirms_when_stream_is_closed_after_result(self):
@@ -114,7 +122,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(next(result), {"data": [{"url": "http://example.test/image.png"}]})
             result.close()
 
-        auth.confirm_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
         auth.refund_image_quota.assert_not_called()
 
     def test_non_stream_quota_confirm_failure_returns_result_and_refunds(self):
@@ -128,8 +136,8 @@ class ImageTaskServiceTests(unittest.TestCase):
             result = image_quota_module.run_image_handler_with_quota(handler, {}, reservation)
 
         self.assertEqual(result, {"data": [{"url": "http://example.test/image.png"}]})
-        auth.confirm_image_quota.assert_called_once_with(reservation)
-        auth.refund_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
+        auth.refund_image_quota.assert_called_once_with(reservation, strict=True)
 
     def test_non_stream_quota_uses_custom_success_predicate(self):
         reservation = {"id": "chat-image-reservation"}
@@ -146,7 +154,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(result["choices"][0]["message"]["content"], "![image](data:image/png;base64,abc)")
-        auth.confirm_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
         auth.refund_image_quota.assert_not_called()
 
     def test_stream_quota_confirm_failure_does_not_break_result_stream(self):
@@ -160,8 +168,8 @@ class ImageTaskServiceTests(unittest.TestCase):
             result = image_quota_module.run_image_handler_with_quota(handler, {}, reservation)
             self.assertEqual(list(result), [{"data": [{"url": "http://example.test/image.png"}]}])
 
-        auth.confirm_image_quota.assert_called_once_with(reservation)
-        auth.refund_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
+        auth.refund_image_quota.assert_called_once_with(reservation, strict=True)
 
     def test_stream_quota_retries_refund_when_confirm_and_initial_refund_fail(self):
         reservation = {"id": "stream-reservation"}
@@ -177,7 +185,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(next(result), {"data": [{"url": "http://example.test/image.png"}]})
             result.close()
 
-        auth.confirm_image_quota.assert_called_once_with(reservation)
+        auth.confirm_image_quota.assert_called_once_with(reservation, strict=True)
         self.assertEqual(auth.refund_image_quota.call_count, 2)
 
     def test_stream_quota_refunds_when_stream_is_closed_before_result(self):
@@ -192,7 +200,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(next(result), {"data": []})
             result.close()
 
-        auth.refund_image_quota.assert_called_once_with(reservation)
+        auth.refund_image_quota.assert_called_once_with(reservation, strict=True)
         auth.confirm_image_quota.assert_not_called()
 
     def test_duplicate_submit_uses_existing_task(self):
@@ -284,6 +292,208 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(result["missing_ids"], [])
             self.assertEqual(result["items"][0]["status"], "success")
             self.assertEqual(result["items"][0]["data"][0]["url"], "http://example.test/image.png")
+
+    def test_terminal_tasks_are_cleaned_by_retention_minutes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            path.write_text(
+                json.dumps({
+                    "tasks": [
+                        {
+                            "id": "old-task",
+                            "owner_id": "owner-1",
+                            "status": "success",
+                            "mode": "generate",
+                            "model": "gpt-image-2",
+                            "created_at": "2000-01-01 00:00:00",
+                            "updated_at": "2000-01-01 00:00:00",
+                            "data": [{"url": "http://example.test/old.png"}],
+                        },
+                        {
+                            "id": "future-task",
+                            "owner_id": "owner-1",
+                            "status": "success",
+                            "mode": "generate",
+                            "model": "gpt-image-2",
+                            "created_at": "2099-01-01 00:00:00",
+                            "updated_at": "2099-01-01 00:00:00",
+                            "data": [{"url": "http://example.test/future.png"}],
+                        },
+                    ]
+                }),
+                encoding="utf-8",
+            )
+
+            service = self.make_service(path, retention_minutes_getter=lambda: 1)
+            result = service.list_tasks(OWNER, ["old-task", "future-task"])
+
+            self.assertEqual(result["missing_ids"], ["old-task"])
+            self.assertEqual(len(result["items"]), 1)
+            self.assertEqual(result["items"][0]["id"], "future-task")
+
+    def test_inline_b64_task_result_is_not_persisted_to_disk(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            encoded = "ZmFrZS1pbWFnZQ=="
+            service = self.make_service(
+                path,
+                handler=lambda _payload: {"data": [{"b64_json": encoded, "revised_prompt": "cat"}]},
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="browser-only-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            task = wait_for_task(service, OWNER, "browser-only-task", "success")
+
+            self.assertEqual(task["data"][0]["b64_json"], encoded)
+            self.assertNotIn("b64_json", path.read_text(encoding="utf-8"))
+
+            reloaded = self.make_service(path)
+            result = reloaded.list_tasks(OWNER, ["browser-only-task"])
+            self.assertEqual(result["items"][0]["status"], "success")
+            self.assertTrue(result["items"][0]["data_expired"])
+            self.assertIn("已过期", result["items"][0]["error"])
+            self.assertNotIn("b64_json", json.dumps(result["items"][0], ensure_ascii=False))
+
+    def test_inline_b64_task_result_expires_from_memory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            encoded = "ZmFrZS1pbWFnZQ=="
+            service = self.make_service(
+                path,
+                handler=lambda _payload: {"data": [{"b64_json": encoded, "revised_prompt": "cat"}]},
+                volatile_result_ttl_secs_getter=lambda: 60,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="volatile-expired-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            task = wait_for_task(service, OWNER, "volatile-expired-task", "success")
+            self.assertEqual(task["data"][0]["b64_json"], encoded)
+
+            with service._lock:
+                service._volatile_data["owner-1:volatile-expired-task"]["expires_at"] = 0
+
+            expired = service.list_tasks(OWNER, ["volatile-expired-task"])["items"][0]
+            self.assertEqual(expired["status"], "success")
+            self.assertTrue(expired["data_expired"])
+            self.assertIn("已过期", expired["error"])
+            self.assertNotIn("b64_json", json.dumps(expired, ensure_ascii=False))
+            self.assertNotIn("b64_json", path.read_text(encoding="utf-8"))
+
+    def test_invalid_volatile_ttl_getter_does_not_break_success_task(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            encoded = "ZmFrZS1pbWFnZQ=="
+
+            def broken_ttl():
+                raise ValueError("bad ttl")
+
+            service = self.make_service(
+                path,
+                handler=lambda _payload: {"data": [{"b64_json": encoded}]},
+                volatile_result_ttl_secs_getter=broken_ttl,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="bad-ttl-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            task = wait_for_task(service, OWNER, "bad-ttl-task", "success")
+            self.assertEqual(task["data"][0]["b64_json"], encoded)
+
+    def test_volatile_results_are_trimmed_by_count_limit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+
+            def handler(payload):
+                return {"data": [{"b64_json": f"image-{payload.get('prompt')}"}]}
+
+            service = self.make_service(
+                path,
+                handler=handler,
+                max_volatile_results_getter=lambda: 1,
+                max_volatile_bytes_getter=lambda: 1024,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="volatile-first",
+                prompt="first",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            first = wait_for_task(service, OWNER, "volatile-first", "success")
+            self.assertEqual(first["data"][0]["b64_json"], "image-first")
+
+            service.submit_generation(
+                OWNER,
+                client_task_id="volatile-second",
+                prompt="second",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            second = wait_for_task(service, OWNER, "volatile-second", "success")
+            self.assertEqual(second["data"][0]["b64_json"], "image-second")
+
+            items = service.list_tasks(OWNER, ["volatile-first", "volatile-second"])["items"]
+            by_id = {item["id"]: item for item in items}
+            self.assertTrue(by_id["volatile-first"]["data_expired"])
+            self.assertEqual(by_id["volatile-second"]["data"][0]["b64_json"], "image-second")
+            self.assertNotIn("b64_json", path.read_text(encoding="utf-8"))
+
+    def test_volatile_results_are_trimmed_after_limit_is_lowered(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            limit = {"count": 2}
+
+            def handler(payload):
+                return {"data": [{"b64_json": f"image-{payload.get('prompt')}"}]}
+
+            service = self.make_service(
+                path,
+                handler=handler,
+                max_volatile_results_getter=lambda: limit["count"],
+                max_volatile_bytes_getter=lambda: 1024,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="volatile-first",
+                prompt="first",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            wait_for_task(service, OWNER, "volatile-first", "success")
+            service.submit_generation(
+                OWNER,
+                client_task_id="volatile-second",
+                prompt="second",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            wait_for_task(service, OWNER, "volatile-second", "success")
+
+            limit["count"] = 1
+            items = service.list_tasks(OWNER, ["volatile-first", "volatile-second"])["items"]
+            by_id = {item["id"]: item for item in items}
+
+            self.assertTrue(by_id["volatile-first"]["data_expired"])
+            self.assertEqual(by_id["volatile-second"]["data"][0]["b64_json"], "image-second")
 
     def test_startup_marks_unfinished_tasks_as_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

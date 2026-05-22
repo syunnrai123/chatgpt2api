@@ -11,7 +11,7 @@ from pathlib import Path
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
-from services.auth_service import AuthService
+from services.auth_service import AuthService, ImageQuotaError
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token
 
@@ -168,6 +168,43 @@ class AuthServiceTests(unittest.TestCase):
             self.assertIsNotNone(authed)
             self.assertEqual(authed["id"], item["id"])
 
+    def test_user_key_allowed_ips_limit_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            item, raw_key = service.create_key(
+                role="user",
+                name="Alice",
+                allowed_ips=["203.0.113.10", "198.51.100.0/24"],
+            )
+
+            self.assertEqual(item["allowed_ips"], ["203.0.113.10", "198.51.100.0/24"])
+            self.assertIsNotNone(service.authenticate(raw_key, client_ip="203.0.113.10"))
+            self.assertIsNotNone(service.authenticate(raw_key, client_ip="198.51.100.42"))
+            self.assertIsNone(service.authenticate(raw_key, client_ip="203.0.113.11"))
+            self.assertIsNone(service.authenticate(raw_key))
+
+    def test_user_key_allowed_ips_can_be_updated_and_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            item, raw_key = service.create_key(role="user", name="Alice")
+
+            self.assertIsNotNone(service.authenticate(raw_key))
+
+            updated = service.update_key(item["id"], {"allowed_ips": ["203.0.113.10"]}, role="user")
+            self.assertEqual(updated["allowed_ips"], ["203.0.113.10"])
+            self.assertIsNone(service.authenticate(raw_key, client_ip="203.0.113.11"))
+
+            updated = service.update_key(item["id"], {"allowed_ips": []}, role="user")
+            self.assertEqual(updated["allowed_ips"], [])
+            self.assertIsNotNone(service.authenticate(raw_key))
+
+    def test_invalid_user_key_allowed_ip_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+
+            with self.assertRaisesRegex(ValueError, "IP 规则无效"):
+                service.create_key(role="user", name="Alice", allowed_ips=["not-an-ip"])
+
     def test_user_key_name_must_be_unique(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
@@ -231,6 +268,19 @@ class AuthServiceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "图片额度不足"):
                 service.reserve_image_quota(identity, mode="generate", count=2)
+
+    def test_strict_image_quota_finish_rejects_missing_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            service._image_quota_multiplier = lambda _mode: Decimal("1")
+            _, raw_key = service.create_key(role="user", name="Alice", image_quota=1)
+            identity = service.authenticate(raw_key)
+            reservation = service.reserve_image_quota(identity, mode="generate", count=1)
+
+            service.refund_image_quota(reservation)
+
+            with self.assertRaisesRegex(ImageQuotaError, "预占记录不存在"):
+                service.confirm_image_quota(reservation, strict=True)
 
     def test_expired_sync_image_quota_reservation_is_pruned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -17,11 +17,11 @@ def reserve_for_image_request(
     return auth_service.reserve_image_quota(identity, mode=mode, count=count, reservation_id=reservation_id)
 
 
-def refund_image_reservation(reservation: dict[str, Any] | None) -> bool:
+def refund_image_reservation(reservation: dict[str, Any] | None, *, strict: bool = True) -> bool:
     if not reservation:
         return True
     try:
-        auth_service.refund_image_quota(reservation)
+        auth_service.refund_image_quota(reservation, strict=strict)
         return True
     except Exception as exc:
         logger.error({"event": "image_quota_refund_failed", "reservation": reservation, "error": str(exc)})
@@ -32,7 +32,7 @@ def confirm_image_reservation(reservation: dict[str, Any] | None) -> bool:
     if not reservation:
         return True
     try:
-        auth_service.confirm_image_quota(reservation)
+        auth_service.confirm_image_quota(reservation, strict=True)
         return True
     except Exception as exc:
         logger.error({"event": "image_quota_confirm_failed", "reservation": reservation, "error": str(exc)})
@@ -46,7 +46,7 @@ def finalize_image_reservation(reservation: dict[str, Any] | None, *, charge: bo
     if not charge:
         return "refunded" if refund_image_reservation(reservation) else "pending"
     try:
-        auth_service.confirm_image_quota(reservation)
+        auth_service.confirm_image_quota(reservation, strict=True)
         return "charged"
     except Exception as exc:
         logger.error({"event": "image_quota_confirm_failed", "reservation": reservation, "error": str(exc)})

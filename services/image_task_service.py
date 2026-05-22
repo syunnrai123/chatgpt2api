@@ -24,6 +24,7 @@ TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
 DEFAULT_TASK_WORKERS = 6
 DEFAULT_TASK_QUEUE_SIZE = 64
+MIN_VOLATILE_RESULT_TTL_SECS = 600
 
 ImageTaskWorkItem = tuple[str, str, str, dict[str, Any], dict[str, object], str]
 
@@ -68,6 +69,36 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+def _has_inline_image_data(data: object) -> bool:
+    return any(isinstance(item, dict) and bool(item.get("b64_json")) for item in data) if isinstance(data, list) else False
+
+
+def _inline_image_data_size(data: object) -> int:
+    if not isinstance(data, list):
+        return 0
+    total = 0
+    for item in data:
+        if isinstance(item, dict):
+            total += len(str(item.get("b64_json") or ""))
+    return total
+
+
+def _strip_inline_image_data(data: object) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        url = _clean(item.get("url"))
+        if not url:
+            continue
+        stripped = {key: value for key, value in item.items() if key != "b64_json"}
+        stripped["url"] = url
+        items.append(stripped)
+    return items
+
+
 def _task_worker_count(value: object = None) -> int:
     if value is not None:
         try:
@@ -90,6 +121,17 @@ def _task_queue_size(value: object = None, worker_count: int = DEFAULT_TASK_WORK
     return min(512, max(DEFAULT_TASK_QUEUE_SIZE, worker_count * 8))
 
 
+def _image_task_response_format() -> str:
+    return "url" if config.image_save_enabled else "b64_json"
+
+
+def _volatile_result_ttl_secs() -> int:
+    try:
+        return max(MIN_VOLATILE_RESULT_TTL_SECS, int(config.image_poll_timeout_secs) + MIN_VOLATILE_RESULT_TTL_SECS)
+    except Exception:
+        return MIN_VOLATILE_RESULT_TTL_SECS + 120
+
+
 def _public_quota_status(status: str, *, pending: str = "charge_pending") -> str:
     return pending if status == "pending" else status
 
@@ -98,7 +140,7 @@ def _refund_task_reservation(reservation: dict[str, Any] | None) -> bool:
     if not reservation:
         return True
     try:
-        auth_service.refund_image_quota(reservation)
+        auth_service.refund_image_quota(reservation, strict=True)
         return True
     except Exception as exc:
         logger.error({"event": "image_task_quota_refund_failed", "reservation": reservation, "error": str(exc)})
@@ -111,7 +153,7 @@ def _finalize_task_reservation(reservation: dict[str, Any] | None, *, charge: bo
     if not charge:
         return "refunded" if _refund_task_reservation(reservation) else "pending"
     try:
-        auth_service.confirm_image_quota(reservation)
+        auth_service.confirm_image_quota(reservation, strict=True)
         return "charged"
     except Exception as exc:
         logger.error({"event": "image_task_quota_confirm_failed", "reservation": reservation, "error": str(exc)})
@@ -147,14 +189,26 @@ class ImageTaskService:
         *,
         generation_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_generations.handle,
         edit_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_edit.handle,
+        retention_minutes_getter: Callable[[], int] | None = None,
         retention_days_getter: Callable[[], int] | None = None,
+        volatile_result_ttl_secs_getter: Callable[[], int] | None = None,
+        max_volatile_results_getter: Callable[[], int] | None = None,
+        max_volatile_bytes_getter: Callable[[], int] | None = None,
         task_workers: int | None = None,
         task_queue_size: int | None = None,
     ):
         self.path = path
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
-        self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
+        if retention_minutes_getter is not None:
+            self.retention_minutes_getter = retention_minutes_getter
+        elif retention_days_getter is not None:
+            self.retention_minutes_getter = lambda: int(retention_days_getter()) * 1440
+        else:
+            self.retention_minutes_getter = lambda: config.image_retention_minutes
+        self.volatile_result_ttl_secs_getter = volatile_result_ttl_secs_getter or _volatile_result_ttl_secs
+        self.max_volatile_results_getter = max_volatile_results_getter or (lambda: config.max_volatile_image_results)
+        self.max_volatile_bytes_getter = max_volatile_bytes_getter or (lambda: config.max_volatile_image_bytes)
         self._lock = threading.RLock()
         self._task_workers = _task_worker_count(task_workers)
         self._task_queue: queue.Queue[ImageTaskWorkItem] = queue.Queue(
@@ -163,6 +217,7 @@ class ImageTaskService:
         self._workers_started = False
         self._worker_lock = threading.Lock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._volatile_data: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -188,7 +243,7 @@ class ImageTaskService:
             "n": 1,
             "size": size,
             "resolution": resolution,
-            "response_format": "url",
+            "response_format": _image_task_response_format(),
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
@@ -214,7 +269,7 @@ class ImageTaskService:
             "n": count,
             "size": size,
             "resolution": resolution,
-            "response_format": "url",
+            "response_format": _image_task_response_format(),
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload, quota_reservation=quota_reservation)
@@ -264,7 +319,7 @@ class ImageTaskService:
             "n": count,
             "size": size,
             "resolution": resolution,
-            "response_format": "url",
+            "response_format": _image_task_response_format(),
             "base_url": base_url,
         }
         with self._lock:
@@ -274,7 +329,7 @@ class ImageTaskService:
             if task.get("mode") != "edit":
                 raise ValueError("image task mode mismatch")
             if task.get("status") != TASK_STATUS_QUEUED:
-                return _public_task(task)
+                return self._public_task(task)
             task["error"] = ""
             task["updated_at"] = _now_iso()
             try:
@@ -301,7 +356,7 @@ class ImageTaskService:
                 except Exception:
                     pass
                 raise
-            public = _public_task(task)
+            public = self._public_task(task)
 
         try:
             self._start_task_thread(key, task_id, "edit", payload, identity, model)
@@ -323,10 +378,10 @@ class ImageTaskService:
                 if task is None:
                     missing_ids.append(task_id)
                 else:
-                    items.append(_public_task(task))
+                    items.append(self._public_task(task))
             if not requested_ids:
                 items = [
-                    _public_task(task)
+                    self._public_task(task)
                     for task in self._tasks.values()
                     if task.get("owner_id") == owner
                 ]
@@ -340,8 +395,9 @@ class ImageTaskService:
         if not normalized_task_id:
             return None
         with self._lock:
+            self._trim_volatile_locked()
             task = self._tasks.get(_task_key(owner, normalized_task_id))
-            return _public_task(task) if task is not None else None
+            return self._public_task(task) if task is not None else None
 
     def _submit(
         self,
@@ -362,12 +418,13 @@ class ImageTaskService:
         now = _now_iso()
         should_start = False
         with self._lock:
+            self._cleanup_volatile_locked()
             cleaned = self._cleanup_locked()
             task = self._tasks.get(key)
             if task is not None:
                 if cleaned:
                     self._save_locked()
-                public = _public_task(task)
+                public = self._public_task(task)
                 if mark_created:
                     public["_created"] = False
                 return public
@@ -411,7 +468,7 @@ class ImageTaskService:
             except Exception:
                 self.fail_task(identity, task_id, "图片任务启动失败")
                 raise
-        public = _public_task(task)
+        public = self._public_task(task)
         if mark_created:
             public["_created"] = True
         return public
@@ -441,7 +498,7 @@ class ImageTaskService:
             )
             current["updated_at"] = _now_iso()
             self._save_locked()
-            return _public_task(current)
+            return self._public_task(current)
 
     def _start_task_thread(
         self,
@@ -586,6 +643,65 @@ class ImageTaskService:
             task = self._tasks.get(key)
             return dict(task) if task is not None else None
 
+    def _public_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        item = _public_task(task)
+        key = _task_key(_clean(task.get("owner_id")), _clean(task.get("id")))
+        volatile = self._volatile_data.get(key)
+        if volatile and task.get("status") == TASK_STATUS_SUCCESS:
+            if float(volatile.get("expires_at") or 0) <= time.time():
+                self._volatile_data.pop(key, None)
+            else:
+                item["data"] = volatile.get("data") or []
+        if task.get("volatile_result") and task.get("status") == TASK_STATUS_SUCCESS and not item.get("data"):
+            item["data_expired"] = True
+            item["error"] = "图片未保存到服务器，结果已过期，请重新生成"
+        return item
+
+    def _volatile_result_expires_at(self) -> float:
+        try:
+            ttl_secs = max(1, int(self.volatile_result_ttl_secs_getter()))
+        except Exception:
+            ttl_secs = _volatile_result_ttl_secs()
+        return time.time() + ttl_secs
+
+    def _max_volatile_results(self) -> int:
+        try:
+            return max(1, int(self.max_volatile_results_getter()))
+        except Exception:
+            return max(1, int(config.max_volatile_image_results))
+
+    def _max_volatile_bytes(self) -> int:
+        try:
+            return max(1, int(self.max_volatile_bytes_getter()))
+        except Exception:
+            return max(1, int(config.max_volatile_image_bytes))
+
+    def _volatile_data_size_locked(self) -> int:
+        return sum(max(0, int(item.get("size_bytes") or 0)) for item in self._volatile_data.values())
+
+    def _trim_volatile_locked(self, protected_key: str = "") -> bool:
+        changed = self._cleanup_volatile_locked()
+        max_results = self._max_volatile_results()
+        max_bytes = self._max_volatile_bytes()
+        current_size = self._volatile_data_size_locked()
+        removable_keys = sorted(
+            (key for key in self._volatile_data if key != protected_key),
+            key=lambda key: (
+                float(self._volatile_data[key].get("expires_at") or 0),
+                float(self._volatile_data[key].get("created_at") or 0),
+            ),
+        )
+        for key in removable_keys:
+            if len(self._volatile_data) <= max_results and current_size <= max_bytes:
+                break
+            removed = self._volatile_data.pop(key, None)
+            current_size -= max(0, int((removed or {}).get("size_bytes") or 0))
+            changed = True
+        if current_size > max_bytes and protected_key:
+            removed = self._volatile_data.pop(protected_key, None)
+            changed = removed is not None or changed
+        return changed
+
     def _clear_task_quota_reservation(self, key: str) -> None:
         with self._lock:
             task = self._tasks.get(key)
@@ -612,6 +728,26 @@ class ImageTaskService:
                 return
             if remove_quota_reservation:
                 task.pop("quota_reservation", None)
+            if "data" in updates:
+                data = updates.pop("data")
+                if _has_inline_image_data(data):
+                    self._volatile_data[key] = {
+                        "data": data if isinstance(data, list) else [],
+                        "expires_at": self._volatile_result_expires_at(),
+                        "created_at": time.time(),
+                        "size_bytes": _inline_image_data_size(data),
+                    }
+                    self._trim_volatile_locked(protected_key=key)
+                    task["volatile_result"] = True
+                    stripped = _strip_inline_image_data(data)
+                    if stripped:
+                        task["data"] = stripped
+                    else:
+                        task.pop("data", None)
+                else:
+                    self._volatile_data.pop(key, None)
+                    task.pop("volatile_result", None)
+                    task["data"] = data
             task.update(updates)
             task["updated_at"] = _now_iso()
             self._save_locked()
@@ -650,7 +786,9 @@ class ImageTaskService:
             }
             data = item.get("data")
             if isinstance(data, list):
-                task["data"] = data
+                stripped_data = _strip_inline_image_data(data) if _has_inline_image_data(data) else data
+                if stripped_data:
+                    task["data"] = stripped_data
             error = _clean(item.get("error"))
             if error:
                 task["error"] = error
@@ -662,14 +800,36 @@ class ImageTaskService:
             quota_status = _clean(item.get("quota_status"))
             if quota_status:
                 task["quota_status"] = quota_status
+            if item.get("volatile_result") is True:
+                task["volatile_result"] = True
             tasks[_task_key(owner, task_id)] = task
         return tasks
 
     def _save_locked(self) -> None:
-        items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        items = []
+        for task in sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True):
+            item = dict(task)
+            if _has_inline_image_data(item.get("data")):
+                stripped = _strip_inline_image_data(item.get("data"))
+                if stripped:
+                    item["data"] = stripped
+                else:
+                    item.pop("data", None)
+            items.append(item)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp_path.replace(self.path)
+
+    def _cleanup_volatile_locked(self) -> bool:
+        now = time.time()
+        removed_keys = [
+            key
+            for key, item in self._volatile_data.items()
+            if float(item.get("expires_at") or 0) <= now
+        ]
+        for key in removed_keys:
+            self._volatile_data.pop(key, None)
+        return bool(removed_keys)
 
     def _recover_unfinished_locked(self) -> bool:
         changed = False
@@ -708,11 +868,12 @@ class ImageTaskService:
         return changed
 
     def _cleanup_locked(self) -> bool:
+        self._trim_volatile_locked()
         try:
-            retention_days = max(1, int(self.retention_days_getter()))
+            retention_minutes = max(1, int(self.retention_minutes_getter()))
         except Exception:
-            retention_days = 30
-        cutoff = time.time() - retention_days * 86400
+            retention_minutes = 30 * 24 * 60
+        cutoff = time.time() - retention_minutes * 60
         removed_keys = [
             key
             for key, task in self._tasks.items()
@@ -720,6 +881,7 @@ class ImageTaskService:
         ]
         for key in removed_keys:
             self._tasks.pop(key, None)
+            self._volatile_data.pop(key, None)
         return bool(removed_keys)
 
 

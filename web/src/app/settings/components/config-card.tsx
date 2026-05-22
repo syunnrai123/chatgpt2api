@@ -19,7 +19,12 @@ export function ConfigCard() {
     const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
     const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
     const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
-    const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
+    const setImageSaveEnabled = useSettingsStore((state) => state.setImageSaveEnabled);
+    const setImageRetentionMinutes = useSettingsStore((state) => state.setImageRetentionMinutes);
+    const setTrustProxyHeaders = useSettingsStore((state) => state.setTrustProxyHeaders);
+    const setTrustedProxyIpsText = useSettingsStore((state) => state.setTrustedProxyIpsText);
+    const setMaxVolatileImageResults = useSettingsStore((state) => state.setMaxVolatileImageResults);
+    const setMaxVolatileImageBytes = useSettingsStore((state) => state.setMaxVolatileImageBytes);
     const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
     const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
     const setImageQuotaMultiplier = useSettingsStore((state) => state.setImageQuotaMultiplier);
@@ -109,15 +114,79 @@ export function ConfigCard() {
                         />
                         <p className="text-xs text-stone-500">用于生成图片结果的访问前缀地址。</p>
                     </div>
+                    <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
+                        <label className="flex items-center gap-3 text-sm text-stone-700">
+                            <Checkbox
+                                checked={Boolean(config?.image_save_enabled)}
+                                onCheckedChange={(checked) => setImageSaveEnabled(Boolean(checked))}
+                            />
+                            保存生成图片到服务器
+                        </label>
+                        {config?.image_save_enabled === false ? (
+                            <p className="text-xs leading-6 text-amber-700">
+                                当前为不落盘模式，用户生成结果只返回给浏览器，不会保存到服务器图库。
+                            </p>
+                        ) : null}
+                    </div>
                     <div className="space-y-2">
                         <label className="text-sm text-stone-700">图片自动清理</label>
                         <Input
-                            value={String(config?.image_retention_days || "")}
-                            onChange={(event) => setImageRetentionDays(event.target.value)}
-                            placeholder="30"
+                            type="number"
+                            min="1"
+                            value={String(config?.image_retention_minutes || "")}
+                            onChange={(event) => setImageRetentionMinutes(event.target.value)}
+                            placeholder="43200"
+                            className="h-10 rounded-xl border-stone-200 bg-white"
+                            disabled={config?.image_save_enabled === false}
+                        />
+                        <p className="text-xs text-stone-500">单位分钟，开启保存时自动删除超过该时间的本地图片。</p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm text-stone-700">不落盘内存结果数</label>
+                        <Input
+                            type="number"
+                            min="1"
+                            value={String(config?.max_volatile_image_results || "")}
+                            onChange={(event) => setMaxVolatileImageResults(event.target.value)}
+                            placeholder="64"
                             className="h-10 rounded-xl border-stone-200 bg-white"
                         />
-                        <p className="text-xs text-stone-500">自动删除多少天前的本地图片。</p>
+                        <p className="text-xs text-stone-500">关闭保存时，最多保留多少个浏览器待取图片结果。</p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm text-stone-700">不落盘内存字节上限</label>
+                        <Input
+                            type="number"
+                            min="1"
+                            value={String(config?.max_volatile_image_bytes || "")}
+                            onChange={(event) => setMaxVolatileImageBytes(event.target.value)}
+                            placeholder="268435456"
+                            className="h-10 rounded-xl border-stone-200 bg-white"
+                        />
+                        <p className="text-xs text-stone-500">超过后会淘汰最旧的不落盘图片结果，默认 256 MiB。</p>
+                    </div>
+                    <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
+                        <label className="flex items-center gap-3 text-sm text-stone-700">
+                            <Checkbox
+                                checked={Boolean(config?.trust_proxy_headers)}
+                                onCheckedChange={(checked) => setTrustProxyHeaders(Boolean(checked))}
+                            />
+                            信任反向代理 IP 头
+                        </label>
+                        <p className="text-xs leading-6 text-stone-500">
+                            仅在应用部署在可信反代后方时开启；关闭时用户密钥 IP 绑定只使用直接连接 IP。
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm text-stone-700">可信反代 IP</label>
+                        <Textarea
+                            value={(config?.trusted_proxy_ips || []).join("\n")}
+                            onChange={(event) => setTrustedProxyIpsText(event.target.value)}
+                            placeholder={"每行一个 IP 或 CIDR；开启后必须填写至少一个可信反代来源"}
+                            className="min-h-24 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
+                            disabled={!config?.trust_proxy_headers}
+                        />
+                        <p className="text-xs text-stone-500">开启后，只有这些反代来源的 X-Forwarded-For / X-Real-IP 会生效。</p>
                     </div>
                     <div className="space-y-2">
                         <label className="text-sm text-stone-700">图片轮询超时</label>
@@ -264,13 +333,15 @@ export function ConfigCard() {
                             className="rounded-lg border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
                             当前待保存模式：
                             <span className="ml-1 font-medium text-stone-900">
-                {config?.image_storage?.enabled
-                    ? config.image_storage.mode === "both"
-                        ? "本机 + WebDAV"
-                        : config.image_storage.mode === "webdav"
-                            ? "仅 WebDAV"
-                            : "仅本机"
-                    : "仅本机"}
+                {config?.image_save_enabled === false
+                    ? "不会保存到服务器"
+                    : config?.image_storage?.enabled
+                        ? config.image_storage.mode === "both"
+                            ? "本机 + WebDAV"
+                            : config.image_storage.mode === "webdav"
+                                ? "仅 WebDAV"
+                                : "仅本机"
+                        : "仅本机"}
               </span>
                             <span className="ml-2 text-stone-400">修改后需要点保存，或通过测试/同步按钮自动保存。</span>
                         </div>

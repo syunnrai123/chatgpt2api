@@ -175,6 +175,7 @@ export function ImageResults({
                               className="group relative h-24 w-24 overflow-hidden border border-stone-200/80 bg-stone-100/60 text-left transition hover:border-stone-300"
                               aria-label={`预览参考图 ${image.name || index + 1}`}
                             >
+                              {/* eslint-disable-next-line @next/next/no-img-element -- 参考图来自本地 data URL，使用原生 img 避免 next/image loader 限制。 */}
                               <img
                                 src={image.dataUrl}
                                 alt={image.name || `参考图 ${index + 1}`}
@@ -212,6 +213,7 @@ export function ImageResults({
                         const sizeLabel = image.b64_json ? formatBase64ImageSize(image.b64_json) : "";
                         const dimensions = imageDimensions[image.id];
                         const imageMeta = [sizeLabel, dimensions].filter(Boolean).join(" · ");
+                        const isBrowserOnly = Boolean(image.b64_json && !image.url);
 
                         return (
                           <div
@@ -223,6 +225,7 @@ export function ImageResults({
                               onClick={() => onOpenLightbox(successfulTurnImages, currentIndex)}
                               className="group block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl sm:aspect-auto"
                             >
+                              {/* eslint-disable-next-line @next/next/no-img-element -- 生成结果可能是 base64 或动态 URL，使用原生 img 保持预览兼容性。 */}
                               <img
                                 src={imageSrc}
                                 alt={`Generated result ${index + 1}`}
@@ -240,6 +243,11 @@ export function ImageResults({
                               <div className="min-w-0 text-stone-500">
                                 <span>结果 {index + 1}</span>
                                 {imageMeta ? <span className="block text-stone-400 sm:ml-2 sm:inline">{imageMeta}</span> : null}
+                                {isBrowserOnly ? (
+                                  <span className="mt-1 block text-amber-700 sm:mt-0 sm:ml-2 sm:inline">
+                                    未保存到服务器
+                                  </span>
+                                ) : null}
                               </div>
                               <div className="flex items-center gap-1.5">
                                 <Button

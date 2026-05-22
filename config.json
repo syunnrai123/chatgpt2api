@@ -1,7 +1,13 @@
 {
   "auth-key": "chatgpt2api",
   "refresh_account_interval_minute": 60,
+  "image_save_enabled": false,
+  "image_retention_minutes": 21600,
   "image_retention_days": 15,
+  "trust_proxy_headers": false,
+  "trusted_proxy_ips": [],
+  "max_volatile_image_results": 64,
+  "max_volatile_image_bytes": 268435456,
   "image_poll_timeout_secs": 120,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,

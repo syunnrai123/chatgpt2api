@@ -73,6 +73,21 @@ def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
     return image_storage_service.save(image_data, base_url).url
 
 
+def should_save_image_bytes() -> bool:
+    return bool(config.image_save_enabled)
+
+
+def ensure_image_response_format_allowed(response_format: str) -> None:
+    if response_format != "b64_json" and not should_save_image_bytes():
+        raise ImageGenerationError(
+            "response_format=url requires image_save_enabled=true",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="image_storage_disabled",
+            param="response_format",
+        )
+
+
 def message_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -304,21 +319,28 @@ def format_image_result(
     created: int | None = None,
     message: str = "",
 ) -> dict[str, Any]:
+    ensure_image_response_format_allowed(response_format)
     data: list[dict[str, Any]] = []
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
-        if response_format == "b64_json":
-            data.append({
+        if should_save_image_bytes():
+            url = save_image_bytes(base64.b64decode(b64_json), base_url)
+        else:
+            url = ""
+        if response_format == "b64_json" or not url:
+            payload = {
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
                 "revised_prompt": revised_prompt,
-            })
+            }
+            if url:
+                payload["url"] = url
+            data.append(payload)
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": url,
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -801,6 +823,7 @@ def stream_image_outputs(
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     if str(request.model or "").strip() not in IMAGE_MODELS:
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(IMAGE_MODELS))
+    ensure_image_response_format_allowed(request.response_format)
 
     emitted = False
     last_error = ""

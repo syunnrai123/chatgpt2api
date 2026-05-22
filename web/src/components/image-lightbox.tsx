@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type TouchEvent, type TouchList } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
 
@@ -27,6 +27,12 @@ type ImageTransform = {
   y: number;
 };
 
+type ViewState = {
+  key: string;
+  transform: ImageTransform;
+  isGesturing: boolean;
+};
+
 type TouchGesture =
   | {
       type: "swipe";
@@ -49,6 +55,7 @@ type TouchGesture =
 
 const minScale = 1;
 const maxScale = 4;
+const initialTransform: ImageTransform = { scale: 1, x: 0, y: 0 };
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -94,11 +101,51 @@ export function ImageLightbox({
   const lastTapRef = useRef(0);
   const pendingTransformRef = useRef<ImageTransform | null>(null);
   const rafRef = useRef<number | null>(null);
-  const [transform, setTransform] = useState<ImageTransform>({ scale: 1, x: 0, y: 0 });
-  const [isGesturing, setIsGesturing] = useState(false);
   const current = images[currentIndex];
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
+  const viewKey = `${open ? "open" : "closed"}:${current?.id ?? ""}`;
+  const [viewState, setViewState] = useState<ViewState>({
+    key: viewKey,
+    transform: initialTransform,
+    isGesturing: false,
+  });
+  const activeViewState =
+    viewState.key === viewKey
+      ? viewState
+      : { key: viewKey, transform: initialTransform, isGesturing: false };
+  const transform = activeViewState.transform;
+  const isGesturing = activeViewState.isGesturing;
+
+  const updateViewState = useCallback(
+    (updater: (state: ViewState) => ViewState) => {
+      setViewState((currentState) => {
+        const baseState =
+          currentState.key === viewKey
+            ? currentState
+            : { key: viewKey, transform: initialTransform, isGesturing: false };
+        return updater(baseState);
+      });
+    },
+    [viewKey],
+  );
+
+  const setCurrentTransform = useCallback(
+    (next: ImageTransform | ((currentTransform: ImageTransform) => ImageTransform)) => {
+      updateViewState((currentState) => ({
+        ...currentState,
+        transform: typeof next === "function" ? next(currentState.transform) : next,
+      }));
+    },
+    [updateViewState],
+  );
+
+  const setCurrentIsGesturing = useCallback(
+    (next: boolean) => {
+      updateViewState((currentState) => ({ ...currentState, isGesturing: next }));
+    },
+    [updateViewState],
+  );
 
   const cancelScheduledTransform = useCallback(() => {
     if (rafRef.current != null) {
@@ -116,10 +163,10 @@ export function ImageLightbox({
       const pending = pendingTransformRef.current;
       pendingTransformRef.current = null;
       if (pending) {
-        setTransform(pending);
+        setCurrentTransform(pending);
       }
     });
-  }, []);
+  }, [setCurrentTransform]);
 
   const flushScheduledTransform = useCallback(() => {
     if (rafRef.current != null) {
@@ -129,16 +176,9 @@ export function ImageLightbox({
     const pending = pendingTransformRef.current;
     pendingTransformRef.current = null;
     if (pending) {
-      setTransform(pending);
+      setCurrentTransform(pending);
     }
-  }, []);
-
-  const resetTransform = useCallback(() => {
-    cancelScheduledTransform();
-    setTransform({ scale: 1, x: 0, y: 0 });
-    setIsGesturing(false);
-    gestureRef.current = null;
-  }, [cancelScheduledTransform]);
+  }, [setCurrentTransform]);
 
   const goPrev = useCallback(() => {
     if (hasPrev) onIndexChange(currentIndex - 1);
@@ -147,10 +187,6 @@ export function ImageLightbox({
   const goNext = useCallback(() => {
     if (hasNext) onIndexChange(currentIndex + 1);
   }, [hasNext, currentIndex, onIndexChange]);
-
-  useEffect(() => {
-    resetTransform();
-  }, [current?.id, open, resetTransform]);
 
   useEffect(() => {
     return () => {
@@ -187,13 +223,13 @@ export function ImageLightbox({
   }, [current]);
 
   const toggleZoom = useCallback(() => {
-    setTransform((currentTransform) =>
+    setCurrentTransform((currentTransform) =>
       currentTransform.scale > minScale ? { scale: 1, x: 0, y: 0 } : { scale: 2.5, x: 0, y: 0 },
     );
-  }, []);
+  }, [setCurrentTransform]);
 
   const handleTouchStart = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
+    (event: TouchEvent<HTMLDivElement>) => {
       if (event.touches.length === 2) {
         event.preventDefault();
         const startDistance = getTouchDistance(event.touches);
@@ -203,7 +239,7 @@ export function ImageLightbox({
         }
         const center = getTouchCenter(event.touches);
         cancelScheduledTransform();
-        setIsGesturing(true);
+        setCurrentIsGesturing(true);
         gestureRef.current = {
           type: "pinch",
           startDistance,
@@ -222,7 +258,7 @@ export function ImageLightbox({
       const touch = event.touches[0];
       if (transform.scale > minScale) {
         cancelScheduledTransform();
-        setIsGesturing(true);
+        setCurrentIsGesturing(true);
         gestureRef.current = {
           type: "pan",
           startX: touch.clientX,
@@ -237,11 +273,11 @@ export function ImageLightbox({
         };
       }
     },
-    [transform, cancelScheduledTransform],
+    [transform, cancelScheduledTransform, setCurrentIsGesturing],
   );
 
   const handleTouchMove = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
+    (event: TouchEvent<HTMLDivElement>) => {
       const gesture = gestureRef.current;
       if (!gesture) return;
 
@@ -291,9 +327,9 @@ export function ImageLightbox({
   );
 
   const handleTouchEnd = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
+    (event: TouchEvent<HTMLDivElement>) => {
       flushScheduledTransform();
-      setIsGesturing(false);
+      setCurrentIsGesturing(false);
 
       const gesture = gestureRef.current;
       gestureRef.current = null;
@@ -326,14 +362,14 @@ export function ImageLightbox({
         goNext();
       }
     },
-    [goPrev, goNext, toggleZoom, flushScheduledTransform],
+    [goPrev, goNext, toggleZoom, flushScheduledTransform, setCurrentIsGesturing],
   );
 
   const handleTouchCancel = useCallback(() => {
     cancelScheduledTransform();
-    setIsGesturing(false);
+    setCurrentIsGesturing(false);
     gestureRef.current = null;
-  }, [cancelScheduledTransform]);
+  }, [cancelScheduledTransform, setCurrentIsGesturing]);
 
   if (!current) return null;
 
@@ -393,6 +429,7 @@ export function ImageLightbox({
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchCancel}
           >
+            {/* eslint-disable-next-line @next/next/no-img-element -- 生成结果可能是 base64 或任意临时 URL，不能依赖 next/image 域名配置。 */}
             <img
               src={current.src}
               alt=""

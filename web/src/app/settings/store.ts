@@ -85,7 +85,13 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     return {
         ...config,
         refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
+        image_save_enabled: Boolean(config.image_save_enabled),
+        image_retention_minutes: Number(config.image_retention_minutes || Number(config.image_retention_days || 30) * 1440),
         image_retention_days: Number(config.image_retention_days || 30),
+        trust_proxy_headers: Boolean(config.trust_proxy_headers),
+        trusted_proxy_ips: normalizeTextList(config.trusted_proxy_ips),
+        max_volatile_image_results: Number(config.max_volatile_image_results || 64),
+        max_volatile_image_bytes: Number(config.max_volatile_image_bytes || 268435456),
         image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
         image_account_concurrency: Number(config.image_account_concurrency || 3),
         image_quota: {
@@ -160,6 +166,13 @@ function normalizeFiles(items: CPARemoteFile[]) {
     return files;
 }
 
+function normalizeTextList(value: unknown) {
+    if (Array.isArray(value)) {
+        return value.map((item) => String(item || "").trim()).filter(Boolean);
+    }
+    return String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
 type SettingsStore = {
     config: SettingsConfig | null;
     isLoadingConfig: boolean;
@@ -207,7 +220,12 @@ type SettingsStore = {
     removeBackup: (key: string) => Promise<void>;
     testBackup: () => Promise<void>;
     setRefreshAccountIntervalMinute: (value: string) => void;
-    setImageRetentionDays: (value: string) => void;
+    setImageSaveEnabled: (value: boolean) => void;
+    setImageRetentionMinutes: (value: string) => void;
+    setTrustProxyHeaders: (value: boolean) => void;
+    setTrustedProxyIpsText: (value: string) => void;
+    setMaxVolatileImageResults: (value: string) => void;
+    setMaxVolatileImageBytes: (value: string) => void;
     setImagePollTimeoutSecs: (value: string) => void;
     setImageAccountConcurrency: (value: string) => void;
     setImageQuotaMultiplier: (key: "generation_multiplier" | "edit_multiplier", value: string) => void;
@@ -338,13 +356,24 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         if (!config) {
             return false;
         }
+        const trustedProxyIps = normalizeTextList(config.trusted_proxy_ips);
+        if (config.trust_proxy_headers && trustedProxyIps.length === 0) {
+            toast.error("开启反向代理 IP 头信任时必须填写可信反代 IP 或 CIDR");
+            return false;
+        }
 
         set({isSavingConfig: true});
         try {
             const settingsPayload: Partial<SettingsConfig> = {
                 ...config,
                 refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
-                image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+                image_save_enabled: Boolean(config.image_save_enabled),
+                image_retention_minutes: Math.max(1, Number(config.image_retention_minutes) || Number(config.image_retention_days || 30) * 1440),
+                image_retention_days: Math.max(1, Math.ceil((Number(config.image_retention_minutes) || Number(config.image_retention_days || 30) * 1440) / 1440)),
+                trust_proxy_headers: Boolean(config.trust_proxy_headers),
+                trusted_proxy_ips: trustedProxyIps,
+                max_volatile_image_results: Math.max(1, Number(config.max_volatile_image_results) || 64),
+                max_volatile_image_bytes: Math.max(1, Number(config.max_volatile_image_bytes) || 268435456),
                 image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
                 image_account_concurrency: Math.min(8, Math.max(1, Number(config.image_account_concurrency) || 3)),
                 image_quota: {
@@ -414,8 +443,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         });
     },
 
-    setImageRetentionDays: (value) => {
-        set((state) => state.config ? {config: {...state.config, image_retention_days: value}} : {});
+    setImageSaveEnabled: (value) => {
+        set((state) => state.config ? {config: {...state.config, image_save_enabled: value}} : {});
+    },
+
+    setImageRetentionMinutes: (value) => {
+        set((state) => state.config ? {config: {...state.config, image_retention_minutes: value}} : {});
+    },
+
+    setTrustProxyHeaders: (value) => {
+        set((state) => state.config ? {config: {...state.config, trust_proxy_headers: value}} : {});
+    },
+
+    setTrustedProxyIpsText: (value) => {
+        set((state) => state.config ? {config: {...state.config, trusted_proxy_ips: normalizeTextList(value)}} : {});
+    },
+
+    setMaxVolatileImageResults: (value) => {
+        set((state) => state.config ? {config: {...state.config, max_volatile_image_results: value}} : {});
+    },
+
+    setMaxVolatileImageBytes: (value) => {
+        set((state) => state.config ? {config: {...state.config, max_volatile_image_bytes: value}} : {});
     },
 
     setImagePollTimeoutSecs: (value) => {

@@ -47,8 +47,11 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_i
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_RESOLUTION_STORAGE_KEY = "chatgpt2api:image_last_resolution";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+const CONTINUOUS_REFERENCE_STORAGE_KEY = "chatgpt2api:image_continuous_reference";
 const SUBMIT_IMAGE_TASK_CONCURRENCY = 4;
 const DEFAULT_MAX_IMAGES_PER_TASK = 20;
+const IMAGE_CONTEXT_MAX_TURNS = 8;
+const IMAGE_CONTEXT_MAX_CHARS = 3600;
 const IMAGE_RESOLUTION_ORDER: ImageResolution[] = ["1k", "2k", "4k"];
 const RESOLUTION_FALLBACK_ERROR_PATTERNS = [
     /resolution/i,
@@ -120,6 +123,86 @@ function normalizeMaxImageCount(value: unknown) {
 
 function clampImageCount(value: string, maxCount = DEFAULT_MAX_IMAGES_PER_TASK) {
     return String(Math.min(maxCount, Math.max(1, Math.floor(Number(value) || 1))));
+}
+
+function compactContextText(value: unknown, maxLength = 360) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function successfulImageCount(turn: ImageTurn) {
+    return turn.resultsDeleted ? 0 : turn.images.filter((image) => image.status === "success").length;
+}
+
+function revisedPromptSummary(turn: ImageTurn) {
+    if (turn.resultsDeleted) {
+        return "";
+    }
+    const prompts = turn.images
+        .map((image) => compactContextText(image.revised_prompt, 220))
+        .filter(Boolean);
+    return Array.from(new Set(prompts)).slice(0, 2).join("；");
+}
+
+function buildTurnContextLine(turn: ImageTurn, turnNumber: number) {
+    const prompt = compactContextText(turn.prompt);
+    if (!prompt) {
+        return "";
+    }
+    const parts = [
+        `第 ${turnNumber} 轮`,
+        turn.mode === "edit" ? "图生图" : "文生图",
+        `用户请求：${prompt}`,
+    ];
+    if (turn.mode === "edit" && turn.referenceImages.length > 0) {
+        parts.push(`参考图 ${turn.referenceImages.length} 张`);
+    }
+    const successCount = successfulImageCount(turn);
+    if (successCount > 0) {
+        parts.push(`已成功生成 ${successCount} 张`);
+    }
+    const revisedPrompt = revisedPromptSummary(turn);
+    if (revisedPrompt) {
+        parts.push(`结果修订提示：${revisedPrompt}`);
+    }
+    return parts.join("；");
+}
+
+function buildContextualImagePrompt(conversation: ImageConversation, activeTurn: ImageTurn) {
+    const activeIndex = conversation.turns.findIndex((turn) => turn.id === activeTurn.id);
+    if (activeIndex <= 0) {
+        return activeTurn.prompt;
+    }
+    const historyLines = conversation.turns
+        .slice(0, activeIndex)
+        .map((turn, index) => ({turn, turnNumber: index + 1}))
+        .filter(({turn}) => !turn.promptDeleted && turn.prompt.trim())
+        .slice(-IMAGE_CONTEXT_MAX_TURNS)
+        .map(({turn, turnNumber}) => buildTurnContextLine(turn, turnNumber))
+        .filter(Boolean);
+    if (historyLines.length === 0) {
+        return activeTurn.prompt;
+    }
+    const historyText = historyLines.join("\n");
+    const compactHistory =
+        historyText.length > IMAGE_CONTEXT_MAX_CHARS
+            ? `...${historyText.slice(historyText.length - IMAGE_CONTEXT_MAX_CHARS)}`
+            : historyText;
+    return [
+        "你正在同一个图片会话中继续创作。请结合历史上下文，保持已经确定的主体、风格、场景和约束一致；如果当前请求与历史上下文冲突，以当前请求为准。",
+        "",
+        "历史上下文：",
+        compactHistory,
+        "",
+        "当前请求：",
+        activeTurn.prompt,
+    ].join("\n");
+}
+
+function ensureEditableReferences(turn: ImageTurn, referenceFiles: File[]) {
+    if (turn.mode === "edit" && referenceFiles.length === 0) {
+        throw new Error("未找到可用于继续编辑的参考图");
+    }
 }
 
 const activeConversationQueueIds = new Set<string>();
@@ -229,6 +312,42 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
     };
 }
 
+async function buildAutomaticReferenceImages(conversation: ImageConversation | null, beforeTurnId?: string) {
+    if (!conversation || conversation.turns.length === 0) {
+        return {referenceImages: [] as StoredReferenceImage[], referenceFiles: [] as File[]};
+    }
+
+    const endIndex = beforeTurnId
+        ? conversation.turns.findIndex((turn) => turn.id === beforeTurnId)
+        : conversation.turns.length;
+    const safeEndIndex = endIndex >= 0 ? endIndex : conversation.turns.length;
+
+    for (let index = safeEndIndex - 1; index >= 0; index -= 1) {
+        const turn = conversation.turns[index];
+        if (turn.resultsDeleted) {
+            continue;
+        }
+        const sourceImage = turn.images.find((image) => image.status === "success" && (image.b64_json || image.url));
+        if (!sourceImage) {
+            continue;
+        }
+        try {
+            const built = await buildReferenceImageFromStoredImage(sourceImage, `${turn.id}-auto-reference.png`);
+            if (!built) {
+                continue;
+            }
+            return {
+                referenceImages: [built.referenceImage],
+                referenceFiles: [built.file],
+            };
+        } catch {
+            continue;
+        }
+    }
+
+    return {referenceImages: [] as StoredReferenceImage[], referenceFiles: [] as File[]};
+}
+
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
     if (task.status === "success") {
         const first = task.data?.[0];
@@ -237,7 +356,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
                 ...image,
                 taskId: task.id,
                 status: "error",
-                error: "未返回图片数据",
+                error: task.data_expired ? task.error || "图片未保存到服务器，结果已过期，请重新生成" : "未返回图片数据",
             };
         }
         return {
@@ -466,11 +585,20 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
         | { type: "all" }
         | null
     >(null);
+    const [continuousReference, setContinuousReference] = useState(false);
 
     const parsedCount = useMemo(() => Number(clampImageCount(imageCount, maxImageCount)), [imageCount, maxImageCount]);
+    const effectiveSelectedConversationId = useMemo(() => {
+        if (!selectedConversationId) {
+            return null;
+        }
+        return conversations.some((item) => item.id === selectedConversationId)
+            ? selectedConversationId
+            : pickFallbackConversationId(conversations);
+    }, [conversations, selectedConversationId]);
     const selectedConversation = useMemo(
-        () => conversations.find((item) => item.id === selectedConversationId) ?? null,
-        [conversations, selectedConversationId],
+        () => conversations.find((item) => item.id === effectiveSelectedConversationId) ?? null,
+        [conversations, effectiveSelectedConversationId],
     );
     const activeTaskCount = useMemo(
         () =>
@@ -513,9 +641,11 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                 const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
                 const storedResolution = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_RESOLUTION_STORAGE_KEY) : null;
                 const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
+                const storedContinuousReference = typeof window !== "undefined" ? window.localStorage.getItem(CONTINUOUS_REFERENCE_STORAGE_KEY) : null;
                 setImageSize(storedSize || "");
                 setImageResolution(normalizeImageResolution(storedResolution));
                 setImageCount(storedCount || "1");
+                setContinuousReference(storedContinuousReference === "true");
 
                 const items = await listImageConversations();
                 const normalizedItems = await recoverConversationHistory(items);
@@ -603,12 +733,12 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             return;
         }
 
-        if (selectedConversationId) {
-            window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, selectedConversationId);
+        if (effectiveSelectedConversationId) {
+            window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, effectiveSelectedConversationId);
         } else {
             window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
         }
-    }, [selectedConversationId]);
+    }, [effectiveSelectedConversationId]);
 
     useEffect(() => {
         if (typeof window === "undefined") {
@@ -635,10 +765,15 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
     }, [isMaxImageCountLoaded, parsedCount]);
 
     useEffect(() => {
-        if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
-            setSelectedConversationId(pickFallbackConversationId(conversations));
+        if (typeof window === "undefined") {
+            return;
         }
-    }, [conversations, selectedConversationId]);
+        if (continuousReference) {
+            window.localStorage.setItem(CONTINUOUS_REFERENCE_STORAGE_KEY, "true");
+        } else {
+            window.localStorage.removeItem(CONTINUOUS_REFERENCE_STORAGE_KEY);
+        }
+    }, [continuousReference]);
 
     const persistConversation = async (conversation: ImageConversation) => {
         const nextConversations = sortImageConversations([
@@ -1074,9 +1209,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                 const referenceFiles = activeTurn.referenceImages.map((image, index) =>
                     dataUrlToFile(image.dataUrl, image.name || `${activeTurn.id}-${index + 1}.png`, image.type),
                 );
-                if (activeTurn.mode === "edit" && referenceFiles.length === 0) {
-                    throw new Error("未找到可用于继续编辑的参考图");
-                }
+                const taskPrompt = buildContextualImagePrompt(snapshot, activeTurn);
+                ensureEditableReferences(activeTurn, referenceFiles);
 
                 const markSubmitFailures = async (failures: Array<{ taskId: string; message: string }>) => {
                     if (failures.length === 0) {
@@ -1133,8 +1267,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                             const resolution = normalizeImageResolution(image.resolution || activeTurn.resolution);
                             try {
                                 const task = activeTurn.mode === "edit"
-                                    ? await createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, resolution)
-                                    : await createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, resolution);
+                                    ? await createImageEditTask(taskId, referenceFiles, taskPrompt, activeTurn.model, activeTurn.size, resolution)
+                                    : await createImageGenerationTask(taskId, taskPrompt, activeTurn.model, activeTurn.size, resolution);
                                 submittedTasks.push(task);
                             } catch (error) {
                                 const message = error instanceof Error ? error.message : "创建图片任务失败";
@@ -1242,12 +1376,16 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             const now = new Date().toISOString();
             const nextTurnId = createId();
             const count = Number(clampImageCount(String(sourceTurn.count || sourceTurn.images.length || 1), maxImageCount));
+            const automaticReferences = sourceTurn.referenceImages.length > 0 || !continuousReference
+                ? {referenceImages: [] as StoredReferenceImage[], referenceFiles: [] as File[]}
+                : await buildAutomaticReferenceImages(conversation, sourceTurn.id);
             const nextTurn: ImageTurn = {
                 id: nextTurnId,
                 prompt: sourceTurn.prompt,
                 model: sourceTurn.model,
-                mode: sourceTurn.mode,
-                referenceImages: sourceTurn.referenceImages,
+                mode: sourceTurn.referenceImages.length > 0 ? "edit" : automaticReferences.referenceImages.length > 0 ? "edit" : sourceTurn.mode,
+                referenceImages:
+                    sourceTurn.referenceImages.length > 0 ? sourceTurn.referenceImages : automaticReferences.referenceImages,
                 count,
                 size: sourceTurn.size,
                 resolution: normalizeImageResolution(sourceTurn.resolution),
@@ -1266,7 +1404,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             void runConversationQueue(conversationId);
             toast.success("已加入重新生成队列");
         },
-        [maxImageCount, runConversationQueue],
+        [maxImageCount, runConversationQueue, continuousReference],
     );
 
     const handleRetryImage = useCallback(
@@ -1338,11 +1476,16 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             return;
         }
 
-        const effectiveImageMode: ImageConversationMode = referenceImageFiles.length > 0 ? "edit" : "generate";
-
-        const targetConversation = selectedConversationId
-            ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
+        const targetConversation = effectiveSelectedConversationId
+            ? conversationsRef.current.find((conversation) => conversation.id === effectiveSelectedConversationId) ?? null
             : null;
+        const automaticReferences =
+            referenceImageFiles.length > 0 || !continuousReference
+                ? {referenceImages: [] as StoredReferenceImage[], referenceFiles: [] as File[]}
+                : await buildAutomaticReferenceImages(targetConversation);
+        const nextReferenceImages = referenceImages.length > 0 ? referenceImages : automaticReferences.referenceImages;
+        const nextReferenceFiles = referenceImageFiles.length > 0 ? referenceImageFiles : automaticReferences.referenceFiles;
+        const nextImageMode: ImageConversationMode = nextReferenceFiles.length > 0 ? "edit" : "generate";
         const now = new Date().toISOString();
         const conversationId = targetConversation?.id ?? createId();
         const turnId = createId();
@@ -1350,8 +1493,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
             id: turnId,
             prompt,
             model: "gpt-image-2",
-            mode: effectiveImageMode,
-            referenceImages: effectiveImageMode === "edit" ? referenceImages : [],
+            mode: nextImageMode,
+            referenceImages: nextImageMode === "edit" ? nextReferenceImages : [],
             count: parsedCount,
             size: imageSize,
             resolution: imageResolution,
@@ -1398,7 +1541,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                     <ImageSidebar
                         conversations={conversations}
                         isLoadingHistory={isLoadingHistory}
-                        selectedConversationId={selectedConversationId}
+                        selectedConversationId={effectiveSelectedConversationId}
                         onCreateDraft={handleCreateDraft}
                         onClearHistory={openClearHistoryConfirm}
                         onSelectConversation={setSelectedConversationId}
@@ -1421,7 +1564,7 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                             <ImageSidebar
                                 conversations={conversations}
                                 isLoadingHistory={isLoadingHistory}
-                                selectedConversationId={selectedConversationId}
+                                selectedConversationId={effectiveSelectedConversationId}
                                 onCreateDraft={() => {
                                     handleCreateDraft();
                                     setIsHistoryOpen(false);
@@ -1503,6 +1646,8 @@ function ImagePageContent({isAdmin, initialMaxImageCount}: { isAdmin: boolean; i
                         onPickReferenceImage={() => fileInputRef.current?.click()}
                         onReferenceImageChange={handleReferenceImageChange}
                         onRemoveReferenceImage={handleRemoveReferenceImage}
+                        continuousReference={continuousReference}
+                        onContinuousReferenceChange={setContinuousReference}
                     />
                 </div>
             </section>

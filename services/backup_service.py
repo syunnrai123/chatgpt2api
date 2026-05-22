@@ -9,7 +9,7 @@ import random
 import subprocess
 import tarfile
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -21,7 +21,7 @@ from services.image_tags_service import TAGS_FILE
 
 
 def _utc_now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _iso_now() -> str:
